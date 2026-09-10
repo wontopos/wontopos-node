@@ -1,0 +1,20 @@
+// A second emit of the same source as CommonJS.
+//
+// `require("wontopos")` failed outright: "type": "module" with no `require`
+// condition in `exports` means Node CJS never resolves this package at all — not a
+// degraded experience, an unresolvable one. Anthropic's and OpenAI's SDKs both ship
+// dual builds, and an agent SDK meets plenty of code that has not moved to ESM.
+//
+// `dist/cjs/package.json` (written by the build) carries {"type":"commonjs"}, because
+// Node reads the NEAREST package.json to decide a .js file's module kind, and the
+// root one says "module".
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "./dist/cjs",
+    // One set of types, emitted by the ESM build. Two would drift.
+    "declaration": false
+  }
+}

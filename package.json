@@ -1,0 +1,52 @@
+{
+  "name": "wontopos",
+  "version": "2.2.37",
+  "description": "Wontopos — long-term memory for AI agents. Identical recall in every language, ~100× lower LLM bill.",
+  "keywords": [
+    "memory",
+    "ai",
+    "agent",
+    "llm",
+    "multilingual",
+    "rag",
+    "context"
+  ],
+  "homepage": "https://github.com/wontopos/wontopos-node#readme",
+  "license": "MIT",
+  "author": "Wontopos",
+  "type": "module",
+  "main": "./dist/cjs/wontopos.js",
+  "module": "./dist/wontopos.js",
+  "types": "./dist/wontopos.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/wontopos.d.ts",
+      "import": "./dist/wontopos.js",
+      "require": "./dist/cjs/wontopos.js",
+      "default": "./dist/wontopos.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.types.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
+    "test": "npm run build && node --test tests/client.test.mjs tests/cjs.test.cjs",
+    "prepublishOnly": "npm run build && node scripts/pre-publish.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "bugs": {
+    "url": "https://wontopos.com/contact?topic=bug"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wontopos/wontopos-node.git"
+  }
+}
