@@ -38,3 +38,22 @@ test("both builds carry the same public surface", () => {
     assert.deepEqual(cjs, names, "the two builds export different names");
   });
 });
+
+// The TYPES half of the same story. `require("wontopos")` resolved and ran, but a
+// TypeScript CJS consumer on node16/nodenext resolution still could not use it: the
+// exports map carried ONE top-level "types" pointing at dist/wontopos.d.ts, and under
+// "type": "module" that file is an ESM declaration — TS1479, "cannot be imported with
+// require". Runtime worked, so the existing test above said nothing. The require
+// condition now names its own .d.cts.
+test("the require condition ships a CommonJS declaration file", () => {
+  // Through the exports map, which is also what a bundler does — a map that omits
+  // "./package.json" makes this ERR_PACKAGE_PATH_NOT_EXPORTED.
+  const pkg = JSON.parse(readFileSync(require.resolve("wontopos/package.json"), "utf8"));
+  const req = pkg.exports["."].require;
+  assert.equal(typeof req, "object", "the require condition must carry its own types");
+  assert.ok(req.types.endsWith(".d.cts"), `require types must be .d.cts, got ${req.types}`);
+  assert.ok(pkg.exports["."].import.types.endsWith(".d.ts"), "import types stay .d.ts");
+  for (const rel of [req.types, req.default, pkg.exports["."].import.types, pkg.exports["."].import.default]) {
+    assert.ok(readFileSync(require("node:path").join(__dirname, "..", rel), "utf8").length > 0, `${rel} must exist`);
+  }
+});

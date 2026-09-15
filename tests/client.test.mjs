@@ -50,17 +50,22 @@ test("search opts cannot override reserved fields (user_id / query / max_results
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
     // An app forwarding untrusted input as opts must not be able to steer the store.
-    await mem.search("real-query", "alice", 7, {
-      user_id: "evil",
-      query: "evil",
-      max_results: 999,
-      filters: { categories: ["x"] },
-    });
+    // Refused at the call, so the attempt is visible instead of quietly overridden.
+    for (const bad of [{ user_id: "evil" }, { query: "evil" }, { max_results: 999 }]) {
+      await assert.rejects(
+        () => mem.search("real-query", "alice", 7, bad),
+        /set by the call, not by options/,
+        `${Object.keys(bad)[0]} must be refused, not dropped`
+      );
+    }
+    assert.equal(seen.length, 0, "a refused option must not reach the wire");
+
+    await mem.search("real-query", "alice", 7, { filters: { categories: ["x"] } });
     const body = JSON.parse(seen[0].body);
     assert.equal(body.user_id, "alice");
     assert.equal(body.query, "real-query");
     assert.equal(body.max_results, 7);
-    assert.deepEqual(body.filters, { categories: ["x"] }); // non-reserved opts still pass through
+    assert.deepEqual(body.filters, { categories: ["x"] });
   } finally {
     server.close();
   }
@@ -255,6 +260,27 @@ test("timeout applies to a hung response BODY, not just headers", async () => {
   } finally {
     server.close();
   }
+});
+
+test("withUser and the constructor refuse an unusable store id, like add() does", () => {
+  // The per-call guard lived only in uid(), so the builder form walked past it:
+  // withUser("") / withUser(null) / withUser(0) all became the shared default store
+  // while add(text, "") threw. withUser is the documented per-tenant pattern, so a
+  // failed session lookup wrote one end-user's memories where everyone could read them.
+  const mem = new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9", userId: "tenant-A" });
+  for (const bad of ["", " ", null, 0, 12345, {}, []]) {
+    assert.throws(() => mem.withUser(bad), /non-blank string/, `withUser(${JSON.stringify(bad)})`);
+    assert.throws(
+      () => new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9", userId: bad }),
+      /non-blank string/,
+      `new Client({ userId: ${JSON.stringify(bad)} })`,
+    );
+  }
+  // Calling withUser AT ALL means "bind this store", so undefined is a lookup that
+  // found nothing — not the omission the constructor reads it as.
+  assert.throws(() => mem.withUser(undefined), /withUser\(\) needs a store id/);
+  assert.equal(new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9" }).toJSON().userId, "default");
+  assert.equal(mem.withModel("tablet-2").toJSON().userId, "tenant-A");
 });
 
 test("deleteAll rejects blank/whitespace userId (would wipe the default store)", () => {
@@ -1653,4 +1679,30 @@ test("dist ships no source comments in JS and keeps the doc comments in .d.ts", 
     "dist/wontopos.d.ts carries a line comment. Declaration emit should only carry doc " +
       "comments attached to exported declarations; a `//` here means something internal followed."
   );
+});
+
+test("a misspelled search option is refused before the wire", async () => {
+  const { server, seen, base } = await scriptedServer([[200, {}, '{"memories":[]}']]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    // `verfy` used to be sent as written. The service drops keys it does not know and
+    // answers 200, so the re-ask passes never ran while the reply looked complete.
+    for (const [bad, meant] of [["verfy", "verify"], ["max_image", "max_images"], ["speakr", "speaker"]]) {
+      await assert.rejects(
+        () => mem.search("q", "alice", 10, { [bad]: 1 }),
+        (e) => e.message.includes(bad) && e.message.includes(meant),
+        `${bad} must be refused and name ${meant}`
+      );
+    }
+    assert.equal(seen.length, 0, "a refused option must not reach the wire");
+
+    // `extra` is the declared way past, so a service option this version has not
+    // learned is still reachable without reopening the hole.
+    await mem.search("q", "alice", 10, { extra: { future_option: 1 } });
+    const body = JSON.parse(seen[0].body);
+    assert.equal(body.future_option, 1);
+    assert.equal("extra" in body, false, "the wrapper itself must not travel");
+  } finally {
+    server.close();
+  }
 });

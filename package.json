@@ -1,7 +1,7 @@
 {
   "name": "wontopos",
-  "version": "2.2.37",
-  "description": "Wontopos — long-term memory for AI agents. Identical recall in every language, ~100× lower LLM bill.",
+  "version": "2.2.38",
+  "description": "Wontopos \u2014 long-term memory for AI agents. Identical recall in every language, ~100\u00d7 lower LLM bill.",
   "keywords": [
     "memory",
     "ai",
@@ -11,7 +11,7 @@
     "rag",
     "context"
   ],
-  "homepage": "https://github.com/wontopos/wontopos-node#readme",
+  "homepage": "https://wontopos.com",
   "license": "MIT",
   "author": "Wontopos",
   "type": "module",
@@ -20,11 +20,17 @@
   "types": "./dist/wontopos.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/wontopos.d.ts",
-      "import": "./dist/wontopos.js",
-      "require": "./dist/cjs/wontopos.js",
+      "import": {
+        "types": "./dist/wontopos.d.ts",
+        "default": "./dist/wontopos.js"
+      },
+      "require": {
+        "types": "./dist/cjs/wontopos.d.cts",
+        "default": "./dist/cjs/wontopos.js"
+      },
       "default": "./dist/wontopos.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -35,7 +41,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc && tsc -p tsconfig.types.json && tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
+    "build": "tsc && tsc -p tsconfig.types.json && tsc -p tsconfig.cjs.json && node -e \"const fs=require('fs');fs.writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n');fs.copyFileSync('dist/wontopos.d.ts','dist/cjs/wontopos.d.cts')\"",
     "test": "npm run build && node --test tests/client.test.mjs tests/cjs.test.cjs",
     "prepublishOnly": "npm run build && node scripts/pre-publish.mjs"
   },

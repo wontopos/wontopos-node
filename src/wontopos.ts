@@ -41,7 +41,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.37";
+const VERSION = "2.2.38";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -117,6 +117,20 @@ function normalizeStoreId(id: string): string {
  *  oldest rather than refusing new ones means a collision that first shows up late
  *  still gets its one warning. */
 const WARNED_STORE_IDS_MAX = 1024;
+/** A store id is usable when it was omitted, or is a non-blank string.
+ *
+ *  The check is `typeof !== "string"`, not `!String(id).trim()`. The old form only
+ *  caught a blank STRING, and the value a failed lookup actually produces in JavaScript
+ *  is `null` — `String(null)` is the truthy "null", so it sailed through. */
+function assertUsableStoreId(userId: unknown): asserts userId is string | undefined {
+  if (userId !== undefined && (typeof userId !== "string" || !userId.trim())) {
+    throw new Error(
+      `userId must be a non-blank string; got ${JSON.stringify(userId)}. Omit it to use the client's ` +
+        "default store, or pass a real store id — anything else would silently write into the default store.",
+    );
+  }
+}
+
 /** Same cap, same reason, for the unknown-filter warn set. */
 const WARNED_FILTER_KEYS_MAX = 1024;
 const warnedStoreIds = new Set<string>();
@@ -822,6 +836,70 @@ const KNOWN_FILTER_KEYS = new Set([
   "min_importance",
 ]);
 const warnedFilterKeys = new Set<string>();
+const KNOWN_SEARCH_KEYS = new Set([
+  "cache_control", "speaker", "filters", "verify", "max_images", "extra",
+]);
+/** Named arguments of the call. Reaching the body through options would let forwarded
+ *  input choose someone else's store. */
+const RESERVED_SEARCH_KEYS = new Set(["user_id", "query", "max_results"]);
+const KNOWN_RECALL_KEYS = new Set(["form", "tz", "limit", "context_limit"]);
+
+/** Refuse a search option this client does not know.
+ *
+ * The service drops keys it does not recognise and answers normally, so a misspelled
+ * option is indistinguishable from one that worked: `verify` asks for extra retrieval
+ * passes, and `verfy` asks for nothing while the reply still looks complete. Filters
+ * only warn because a wrong filter still returns memories; a wrong option silently
+ * turns a paid feature off. `extra` carries anything this version has not learned yet.
+ */
+function checkSearchOpts(opts: object): void {
+  checkOpts(opts, KNOWN_SEARCH_KEYS, "search");
+}
+
+/** The same check for any option bag. `recall` had none, so `contextLimit: 0` — the
+ *  camelCase typo of `context_limit`, and the one value that means "attach nothing" —
+ *  vanished, the service applied its default of 10, and the caller paid for ten context
+ *  memories they had explicitly asked not to have. TypeScript catches the object-literal
+ *  form; JS callers and anything forwarded as `any` do not. */
+function checkOpts(opts: object, known: Set<string>, what: string): void {
+  for (const k of Object.keys(opts)) {
+    if (RESERVED_SEARCH_KEYS.has(k))
+      throw new Error(
+        `${JSON.stringify(k)} is set by the call, not by options — pass it as an argument. ` +
+          `An app forwarding untrusted input as options cannot steer the store, the query ` +
+          `or the count, and this says so rather than dropping it silently.`
+      );
+    if (known.has(k)) continue;
+    const near = [...known].find((n) => n !== "extra" && editWithin(k, n, 2));
+    throw new Error(
+      `unknown ${what} option ${JSON.stringify(k)}` +
+        (near ? ` — did you mean ${JSON.stringify(near)}?` : "") +
+        `. The service drops keys it does not know and answers anyway, so this would ` +
+        `have looked like it worked.` +
+        (known.has("extra")
+          ? ` Pass it under \`extra\` if the service accepts it and this client does not know it yet.`
+          : "")
+    );
+  }
+}
+
+/** Within `max` single-character edits of each other. Small strings, called once per
+ *  bad key, so the full matrix is cheaper than being clever. */
+function editWithin(a: string, b: string, max: number): boolean {
+  if (Math.abs(a.length - b.length) > max) return false;
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = tmp;
+    }
+  }
+  return prev[b.length] <= max;
+}
+
 function warnOnUnknownFilters(filters: unknown): void {
   if (!filters || typeof filters !== "object" || Array.isArray(filters)) return;
   for (const k of Object.keys(filters)) {
@@ -846,7 +924,10 @@ export function _resetFilterWarnings(): void {
   warnedFilterKeys.clear();
 }
 
-/** Known `search` options; extra fields pass through to the API untouched. */
+/** Known `search` options. An unknown key is refused before anything is sent — the
+ *  service drops keys it does not recognise and answers normally, so a misspelling
+ *  could not be told from an option that worked. Put a genuinely new one under
+ *  `extra`. */
 export interface SearchOptions {
   /** Recall caching. A hit inside the TTL bills at 0.1× — but the FIRST call
    *  writes the cache and bills the query tokens at 2× (`5m`) or 3× (`1h`), so
@@ -873,7 +954,9 @@ export interface SearchOptions {
    */
   verify?: number;
   /**
-   * How many image memories the answer may carry, 0–5. Default 1; 0 asks for none.
+   * How many image memories the answer may carry, 0–5. Omit it and the service uses
+   * 1; `0` asks for none. The MCP server defaults its own tool to 0 instead, so most
+   * searches through it carry no image rows.
    * Out of range is refused, not clamped — silently cutting 5 to 1 would leave you
    * believing you got five.
    *
@@ -881,7 +964,13 @@ export interface SearchOptions {
    * than answering with no images.
    */
   max_images?: number;
-  [key: string]: unknown;
+  /**
+   * Fields the service accepts that this version does not know about, merged into the
+   * request as written. Every other key is refused, so a typo cannot reach the wire —
+   * `verfy: 3` used to be sent, dropped by the service, and answered normally, leaving
+   * a caller billed for one pass believing they had bought three.
+   */
+  extra?: Record<string, unknown>;
 }
 
 /**
@@ -1012,6 +1101,17 @@ export class Client {
     // while all three READMEs announced the guard without naming a language.
     if (/[\x00-\x1f\x7f]/.test(key))
       throw new Error("apiKey contains a control character - check for a stray byte or paste error");
+    // Keys are ASCII by construction. A key pasted from a rich-text doc, Slack or a PDF
+    // has had its hyphen turned into an en dash, which then travels into the header and
+    // fails as the same mystery 401. Python refuses it by name; this one did not.
+    // eslint-disable-next-line no-control-regex
+    if (/[^\x00-\x7f]/.test(key)) {
+      const bad = key.match(/[^\x00-\x7f]/)?.[0];
+      throw new Error(
+        `apiKey contains a non-ASCII character (${JSON.stringify(bad)}) - rich text turns '-' into an ` +
+          "en dash; copy the key from a plain-text field",
+      );
+    }
     this.apiKey = key;
     this.base = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     // Coerce a non-finite or non-positive timeout back to the default — NaN
@@ -1023,7 +1123,14 @@ export class Client {
     if (this.model && !MODEL_RE.test(this.model)) {
       throw new Error(`invalid model name: ${JSON.stringify(this.model)} (letters, digits, '.', '_', '-' only)`);
     }
-    this.defaultUser = opts.userId || DEFAULT_USER;
+    // The same guard uid() applies per call. It used to live only there, so
+    // `new Client({ userId })` and `withUser(...)` — the documented per-tenant pattern —
+    // walked straight past it: `withUser("")`, `withUser(null)` and `withUser(0)` all
+    // became the shared `default` store with no warning, while `add(text, "")` threw.
+    // A destination that depends on WHICH door the id came through is the worst kind of
+    // silent redirect: one end-user's memories land in a store everyone can read.
+    assertUsableStoreId(opts.userId);
+    this.defaultUser = opts.userId ?? DEFAULT_USER;
     // Coerce a non-finite maxRetries (NaN/Infinity) back to the default — otherwise
     // NaN makes `attempts = NaN + 1` and the loop runs zero requests then throws
     // "retries exhausted"; Infinity would retry forever.
@@ -1128,13 +1235,8 @@ export class Client {
     // guard was written to stop, and both were still silent.
     //
     // `undefined` alone means "omitted", because that is what an absent argument is.
-    if (userId !== undefined && (typeof userId !== "string" || !userId.trim())) {
-      throw new Error(
-        `userId must be a non-blank string; got ${JSON.stringify(userId)}. Omit it to use the client's ` +
-          "default store, or pass a real store id — anything else would silently write into the default store.",
-      );
-    }
-    const id = userId || this.defaultUser;
+    assertUsableStoreId(userId);
+    const id = userId ?? this.defaultUser;
     warnIfStoreIdCollapses(id);
     return id;
   }
@@ -1171,6 +1273,16 @@ export class Client {
 
   /** A client bound to `userId` as its default store (everything else kept). */
   withUser(userId: string): Client {
+    // Stricter than the constructor on one value: `undefined`. Omitting the option means
+    // "use the default", but CALLING withUser means "bind this store", and the value a
+    // failed lookup hands you is as often `undefined` as `null`. Accepting it here would
+    // leave the one door open that this guard exists to close.
+    if (userId === undefined) {
+      throw new Error(
+        "withUser() needs a store id. It was called with undefined — usually a lookup that " +
+          "found nothing. Use the client's own default instead of calling withUser at all.",
+      );
+    }
     return this.clone({ userId });
   }
 
@@ -1250,6 +1362,11 @@ export class Client {
   // ----- read -----
   /** Search a store's memories. Returns them most relevant first.
    *
+   *  `limit` is 5-20, and out of range is refused rather than clamped: asking for 50
+   *  and silently receiving 20 reads as "that is all there is". The default is 10, so
+   *  a call that passes no count is unaffected. Before 2.2.35 the count was sent on
+   *  unchecked.
+   *
    *  `limit` bounds `memories`, not the returned array. On a model that keeps the
    *  assistant's own words separate (Scroll 1.2+) those come back as well, so the
    *  array can hold more than `limit`. They were retrieved and billed either way;
@@ -1259,9 +1376,11 @@ export class Client {
   async search(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<Memory[]> {
     // Reserved fields win over ...opts: an app that forwards untrusted input as
     // opts must not be able to override the store (user_id), query, or limit.
+    checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
     checkCount(limit, "limit");
-    const r = await this.post("/api/v1/memory/search", { ...opts, user_id: this.uid(userId), query, max_results: limit });
+    const { extra, ...known } = opts;
+    const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
     return mergeResults(r);
   }
   /** Search a self-memory model (Scroll 1.2+): both fields from ONE call. Returns
@@ -1270,9 +1389,11 @@ export class Client {
    * "me"), kept apart so whoever reads them never confuses who said what. On a model
    * that does not keep them apart, `self_memories` is `[]`. `userId` may be omitted. */
   async searchSelf(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<SelfSearchResult> {
+    checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
     checkCount(limit, "limit");
-    const r = await this.post("/api/v1/memory/search", { ...opts, user_id: this.uid(userId), query, max_results: limit });
+    const { extra, ...known } = opts;
+    const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
     return { memories: asRecords<Memory>(r.memories), self_memories: asRecords<Memory>(r.self_memories) };
   }
   /**
@@ -1290,9 +1411,11 @@ export class Client {
    * rather than accepted and ignored.
    */
   async searchFull(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<SearchResult> {
+    checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
     checkCount(limit, "limit");
-    const r = await this.post("/api/v1/memory/search", { ...opts, user_id: this.uid(userId), query, max_results: limit });
+    const { extra, ...known } = opts;
+    const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
     // Spread first so a field added later still arrives; the known ones are then
     // normalized, because a broken proxy can null any of them.
     return {
@@ -1329,6 +1452,7 @@ export class Client {
       context_limit?: number;
     } = {},
   ): Promise<RecallResult> {
+    checkOpts(opts, KNOWN_RECALL_KEYS, "recall");
     const body: Record<string, unknown> = { user_id: this.uid(userId), query };
     if (opts.limit !== undefined) {
       checkCount(opts.limit, "limit");
@@ -1386,10 +1510,10 @@ export class Client {
   get(userId: string | undefined, memoryId: string): Promise<Memory> {
     // Sync throw (same shape as `delete`), so a missing id fails loudly even
     // when the caller forgets to await.
-    if (!memoryId || typeof memoryId !== "string") {
+    if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the id that add/store or listMemories returned.");
     }
-    return this.post("/api/v1/memory/get", { user_id: this.uid(userId), memory_id: memoryId }).then(
+    return this.post("/api/v1/memory/get", { user_id: this.uid(userId), memory_id: memoryId.trim() }).then(
       (r) => asObj<Memory>(r.memory)
     );
   }
@@ -1464,10 +1588,10 @@ export class Client {
    *     await fs.writeFile(`image.${ext}`, bytes);
    */
   getImage(userId: string | undefined, memoryId: string): Promise<ImageBytes> {
-    if (!memoryId || typeof memoryId !== "string") {
+    if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the id that add/store or listImages returned.");
     }
-    return this.requestBytes("/api/v1/memory/image", { user_id: this.uid(userId), memory_id: memoryId });
+    return this.requestBytes("/api/v1/memory/image", { user_id: this.uid(userId), memory_id: memoryId.trim() });
   }
 
   /**
@@ -1486,10 +1610,10 @@ export class Client {
     memoryId: string,
     opts: { preview?: boolean } = {},
   ): Promise<ImageDeleteResult> {
-    if (!memoryId || typeof memoryId !== "string") {
+    if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the id of the memory whose image you want removed.");
     }
-    const body: Record<string, unknown> = { user_id: this.uid(userId), memory_id: memoryId };
+    const body: Record<string, unknown> = { user_id: this.uid(userId), memory_id: memoryId.trim() };
     if (opts.preview) body.preview = true;
     return this.request("DELETE", "/api/v1/memory/image", body);
   }
@@ -1625,10 +1749,10 @@ export class Client {
    * this tells you what happened to one fact.
    */
   lineage(userId: string | undefined, memoryId: string): Promise<LineageResult> {
-    if (!memoryId || typeof memoryId !== "string") {
+    if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the memory whose history you want.");
     }
-    return this.post("/api/v1/memory/lineage", { user_id: this.uid(userId), memory_id: memoryId });
+    return this.post("/api/v1/memory/lineage", { user_id: this.uid(userId), memory_id: memoryId.trim() });
   }
 
   /**
@@ -2061,6 +2185,22 @@ export class Client {
     // a store id (listSpeakers), and logs must never carry data.
     const logPath = path.split("?")[0];
     const deadlineAt = this.deadlineAt();
+    // Serialized ONCE, and outside the fetch try. Inside it, an ORM entity with a
+    // bidirectional relation or a BigInt column in `metadata` made JSON.stringify throw
+    // and came back as APIConnectionError with status 0 — a status this file reserves
+    // for "the request never got a response", so a caller retrying on it retried a
+    // deterministic local mistake forever. On an idempotent method the loop also slept
+    // out the whole retry budget first: measured 7,961ms for removeSpeaker(123n) at
+    // maxRetries 4, with zero requests sent. An argument mistake is a plain Error.
+    let payload: string | undefined;
+    try {
+      payload = body === undefined ? undefined : JSON.stringify(body);
+    } catch (e) {
+      throw new Error(
+        `request body could not be serialized: ${e instanceof Error ? e.message : String(e)}. ` +
+          "Pass plain JSON values — an ORM entity, a BigInt or a circular reference cannot be sent.",
+      );
+    }
     for (let attempt = 0; attempt < attempts; attempt++) {
       const start = Date.now();
       const att = this.beginAttempt(deadlineAt);
@@ -2069,7 +2209,7 @@ export class Client {
         res = await this.fetchImpl(`${this.base}${path}`, {
           method,
           headers: extraHeaders ? { ...this.headers, ...extraHeaders } : this.headers,
-          body: body === undefined ? undefined : JSON.stringify(body),
+          body: payload,
           signal: att.signal,
           // Never follow a redirect: fetch would forward the API key to
           // wherever a 3xx points. The API never legitimately redirects.
