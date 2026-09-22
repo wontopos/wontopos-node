@@ -80,12 +80,12 @@ const hits = await mem.search("...the conversation so far...", "alice", 10,
 
 Built in, no configuration needed:
 
-- **Automatic retries** — 429 always, and 502 / 503 or a connection error only when a
-  retry cannot double-process a write. The writes and the searches are POSTs, and a
-  502 on one of those may have been returned *after* the service already stored and
-  billed it, so those get 429 and connect-level failures only. The reads and the
+- **Automatic retries** — 429 always, and 408 / 502 / 503 / 504 or a connection error
+  only when a retry cannot double-process a write. The writes and the searches are
+  POSTs, and any of those four may have been returned *after* the write already
+  landed, so those get 429 and connect-level failures only. The reads and the
   deletes that address a whole store — `listStores`, `listSpeakers`, `deleteStore`,
-  `removeSpeaker`, `forgetImage` — are GET or DELETE and do retry a 502. Twice, with
+  `removeSpeaker`, `forgetImage` — are GET or DELETE and do retry all four. Twice, with
   exponential backoff + jitter, honoring the server's `Retry-After`. Tune with
   `new Client({ maxRetries })`; `0` disables.
 - **Redirects refused** — the API key never follows a 3xx to another host.
@@ -106,9 +106,7 @@ Built in, no configuration needed:
 ### Behind a corporate proxy
 
 Node's global `fetch` (undici) ignores `HTTP_PROXY` / `HTTPS_PROXY`, so behind an
-egress proxy this SDK could not connect at all — while the Python and Rust SDKs went
-through, because `requests` and `reqwest` both read those variables. Pass a
-proxy-aware `fetch` and the three behave the same:
+egress proxy no request leaves at all. Pass a proxy-aware `fetch` and they go through:
 
 This one needs `npm i undici` — Node's global `fetch` is built on undici, but the
 package itself is not installed for you.
@@ -211,7 +209,7 @@ data to fix it.
 ## Changelog
 
 The three clients release in lockstep — same version, same surface, same day. Patch
-releases are additive. Four inside 2.2 were not, deliberately and each with its
+releases are additive. Five inside 2.2 were not, deliberately and each with its
 reason; the changelog lists them.
 
 See [CHANGELOG.md](https://github.com/wontopos/wontopos-node/blob/main/CHANGELOG.md).

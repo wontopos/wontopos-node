@@ -26,8 +26,8 @@
  * and searching call no LLM.
  *
  * Reliability: every call retries transient failures with exponential backoff +
- * jitter, honoring `Retry-After` — 429 always; 502/503 and connection errors only
- * when a retry can never double-process a write (idempotent calls, or a failure
+ * jitter, honoring `Retry-After` — 429 always; 408/502/503/504 and connection errors
+ * only when a retry can never double-process a write (idempotent calls, or a failure
  * at connect time). Tune with `maxRetries` (0 disables) and `timeoutMs`, or per
  * call site via the `withTimeout()` / `withRetries()` clones.
  *
@@ -41,7 +41,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.38";
+const VERSION = "2.2.39";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -69,12 +69,15 @@ const DEFAULT_BASE_URL = "https://api.wontopos.com";
  *  migration. Pin an older one explicitly with
  *  `new Client({ apiKey, model: "tablet-1" })` or `withModel("tablet-1")`. */
 const DEFAULT_MODEL = "tablet-2";
-/** 429 = rate-limited BEFORE processing → always safe to retry (no write, no bill). */
+/** 429 is refused before the request is processed → always safe to retry, nothing
+ *  was stored. */
 const RETRY_ALWAYS = new Set([429]);
-/** 502/503 are ambiguous for a write (gateway may return them AFTER the backend
- *  processed + billed the request), so retry them only for idempotent methods —
- *  a retried POST could double-store / double-bill. */
-const RETRY_IF_IDEMPOTENT = new Set([502, 503]);
+/** 502/503 are ambiguous for a write — they can arrive after the write already
+ *  landed, and a retried POST would store it twice — so retry them only for
+ *  idempotent methods. 504 is the same shape. 408 sits here rather than in
+ *  RETRY_ALWAYS because an intermediary can answer it without knowing what
+ *  happened further along. */
+const RETRY_IF_IDEMPOTENT = new Set([408, 502, 503, 504]);
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]);
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
 /** Refuse to buffer absurd responses (real ones are a few KB) — protects the
@@ -196,11 +199,7 @@ export const CONTEXT_LIMIT_MAX = 20;
  * NOT a `WosError` — nothing was sent, and `WosError` with status 0 means
  * `APIConnectionError`, "the request never got a response". Reusing that status for
  * a typo told a caller with `if (e.status === 0) retry()` to retry a bad argument
- * forever.
- *
- * Refusing rather than clamping is the same decision as 2.2.35's, where a Rust
- * `limit` of 0 had been rewritten to 10 and the caller was handed ten memories they
- * had not asked for, and the bill for them. */
+ * forever. */
 function checkCount(limit: number, name: string): void {
   if (!Number.isInteger(limit) || limit < SEARCH_LIMIT_MIN || limit > SEARCH_LIMIT_MAX) {
     throw new Error(
@@ -261,7 +260,7 @@ function normalizeImage(image: ImageInput): Record<string, unknown> {
 /** Error codes that only occur while ESTABLISHING a connection — the request
  * never reached the server, so a retry can't double-process a write. Mid-stream
  * codes (ECONNRESET, EPIPE, UND_ERR_SOCKET, ETIMEDOUT) are ambiguous: the server
- * may already have processed (and billed) the request, so they're excluded. */
+ * may already have processed the request, so they're excluded. */
 const CONNECT_FAIL_CODES = new Set([
   "ECONNREFUSED",
   "ENOTFOUND",
@@ -389,8 +388,8 @@ export class RateLimitError extends WosError {}
 /**
  * 5xx — the service failed.
  *
- * `502` / `503` are transient: the client already retries them for calls where a
- * retry cannot double-process a write, and retrying yourself is reasonable.
+ * `502` / `503` / `504` are transient: the client already retries them for calls
+ * where a retry cannot double-process a write, and retrying yourself is reasonable.
  *
  * `501` is NOT transient. It means the engine behind the model you selected does
  * not implement that endpoint at all (the error carries `model` and `endpoint`).
@@ -757,6 +756,9 @@ export interface EngramCatalog {
   engrams: EngramInfo[];
   forms: EngramInfo[];
   note?: string;
+  /** Anything else the reply carried. Responses widen; the runtime keeps those fields
+   *  and this is what lets a typed caller read them. */
+  [key: string]: unknown;
 }
 
 /** `createStore` / `deleteStore` → `{ user_id, status }`. */
@@ -843,6 +845,7 @@ const KNOWN_SEARCH_KEYS = new Set([
  *  input choose someone else's store. */
 const RESERVED_SEARCH_KEYS = new Set(["user_id", "query", "max_results"]);
 const KNOWN_RECALL_KEYS = new Set(["form", "tz", "limit", "context_limit"]);
+const KNOWN_ENGRAM_KEYS = new Set(["form", "tz"]);
 
 /** Refuse a search option this client does not know.
  *
@@ -874,8 +877,7 @@ function checkOpts(opts: object, known: Set<string>, what: string): void {
     throw new Error(
       `unknown ${what} option ${JSON.stringify(k)}` +
         (near ? ` — did you mean ${JSON.stringify(near)}?` : "") +
-        `. The service drops keys it does not know and answers anyway, so this would ` +
-        `have looked like it worked.` +
+        `. It would have had no effect, and the call would have looked like it worked.` +
         (known.has("extra")
           ? ` Pass it under \`extra\` if the service accepts it and this client does not know it yet.`
           : "")
@@ -981,9 +983,9 @@ export interface SearchOptions {
  * arrives with a different body. Use it when a retry is your own (a job that died and
  * was re-run, a queue that redelivers). The SDK retries a write on exactly one
  * status: 429, which the service answers before it processes anything, so nothing
- * was stored. It never retries a write on 502 / 503 or a dropped body, where the
- * request may already have been stored and billed — without a key it cannot know
- * whether that first attempt landed.
+ * was stored. It never retries a write on 408 / 502 / 503 / 504 or a dropped body,
+ * where the first attempt may already have landed — without a key the client cannot
+ * know whether it did.
  *
  * The key must be UNIQUE PER LOGICAL WRITE — derive it from the thing being stored
  * (`` `import:${row.id}` ``), never a constant, or the second write replays the first
@@ -1016,8 +1018,8 @@ export interface ClientOptions {
    * to the account's built-in `default` store. */
   userId?: string;
   /** How many times to retry transient failures before throwing — 429 always;
-   * 502/503 and connection errors only when a retry can never double-process a
-   * write. 0 disables retries (default 2). */
+   * 408/502/503/504 and connection errors only when a retry can never
+   * double-process a write. 0 disables retries (default 2). */
   maxRetries?: number;
   /** Alias of `maxRetries`. The Python SDK calls this option `retries`, and these
    *  SDKs are published in lockstep as "the same surface" — so code ported between
@@ -1045,10 +1047,8 @@ export interface ClientOptions {
    *
    *  This is the seam for anything the runtime cannot express through options.
    *  The one that matters in practice is a corporate egress proxy: Node's global
-   *  fetch (undici) IGNORES `HTTP_PROXY` / `HTTPS_PROXY`, so behind such a proxy
-   *  this SDK could not connect at all — while the Python and Rust SDKs went
-   *  through, because `requests` and `reqwest` both read those variables. Pass a
-   *  proxy-aware fetch and the three behave the same again:
+   *  fetch (undici) IGNORES `HTTP_PROXY` / `HTTPS_PROXY`, so behind such a proxy no
+   *  request leaves at all. Pass a proxy-aware fetch and they go through:
    *
    *      import { ProxyAgent } from "undici";
    *      const agent = new ProxyAgent(process.env.HTTPS_PROXY!);
@@ -1096,14 +1096,12 @@ export class Client {
     if (!key) throw new Error("apiKey is required");
     if (/\s/.test(key)) throw new Error("apiKey contains whitespace - check for a stray newline or paste error");
     // `\s` does not cover NUL, 0x01 or DEL, and those travel into the header and fail
-    // deep inside fetch as the mystery 401 this check exists to prevent. Python has
-    // `_HEADER_CTL_RE` and Rust tests `is_control`; this was the client that did not,
-    // while all three READMEs announced the guard without naming a language.
+    // deep inside fetch as the mystery 401 this check exists to prevent.
     if (/[\x00-\x1f\x7f]/.test(key))
       throw new Error("apiKey contains a control character - check for a stray byte or paste error");
     // Keys are ASCII by construction. A key pasted from a rich-text doc, Slack or a PDF
     // has had its hyphen turned into an en dash, which then travels into the header and
-    // fails as the same mystery 401. Python refuses it by name; this one did not.
+    // fails as the same mystery 401.
     // eslint-disable-next-line no-control-regex
     if (/[^\x00-\x7f]/.test(key)) {
       const bad = key.match(/[^\x00-\x7f]/)?.[0];
@@ -1167,14 +1165,12 @@ export class Client {
     // Parse, don't split. `http://127.0.0.1:9@evil.example` splits to "127.0.0.1" — the
     // USERINFO, not the host — so this check called it loopback and stayed quiet while
     // the key travelled in cleartext to evil.example. `new URL()` knows the difference.
-    // (Python already used urlsplit here; this was the copy that did not.)
     let host: string;
     try {
       // `URL.hostname` keeps the brackets on an IPv6 literal — `http://[::1]:8080`
       // gives back "[::1]", which was never in LOOPBACK_HOSTS, so a local
       // client on the v6 loopback was told its key was travelling in cleartext when
-      // it was not. Python's urlsplit strips them and Rust strips them by hand; this
-      // was the copy that did not. Strip them here so all three agree.
+      // it was not. Strip them so the set matches what it is compared against.
       host = new URL(this.base).hostname.toLowerCase().replace(/^\[|\]$/g, "");
     } catch {
       host = ""; // unparseable → not loopback → warn, which is the safe direction
@@ -1325,17 +1321,17 @@ export class Client {
    *
    * `opts.idempotencyKey`: see {@link WriteOptions} — pass one to make YOUR retry
    * of this exact write safe to repeat. */
-  add(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
+  async add(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, metadata };
     if (opts.image !== undefined) body.image = normalizeImage(opts.image);
     return this.post("/api/v1/memory/store", body, opts.idempotencyKey);
   }
   /** Alias of `add` — store one memory. Same surface as the Python SDK's `store`. */
-  store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
+  async store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
     return this.add(content, userId, metadata, opts);
   }
   /** Store a conversation turn (user + assistant). Payload first, userId last — same shape as add/search. */
-  addTurn(userMsg: string, assistantMsg: string, userId?: string, opts: WriteOptions = {}): Promise<StatusResult> {
+  async addTurn(userMsg: string, assistantMsg: string, userId?: string, opts: WriteOptions = {}): Promise<StatusResult> {
     return this.post(
       "/api/v1/memory/store-turn",
       { user_id: this.uid(userId), user_msg: userMsg, assistant_msg: assistantMsg },
@@ -1344,14 +1340,14 @@ export class Client {
   }
   /** Bulk-ingest a large blob of text in one call. For backfilling.
    *  The call most worth an `opts.idempotencyKey`: a backfill that dies halfway and is
-   *  re-run would otherwise re-ingest and re-bill the whole blob. */
-  addBulk(content: string, userId?: string, category = "general", timestamp?: string, opts: WriteOptions = {}): Promise<StatusResult> {
+   *  re-run would otherwise ingest the whole blob a second time. */
+  async addBulk(content: string, userId?: string, category = "general", timestamp?: string, opts: WriteOptions = {}): Promise<StatusResult> {
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, category };
     if (timestamp) body.timestamp = timestamp;
     return this.post("/api/v1/memory/bulk-store", body, opts.idempotencyKey);
   }
   /** Supersede an old memory with new content. Payload first, userId last — same shape as add/search. */
-  update(oldMemoryId: string, newContent: string, userId?: string, opts: WriteOptions = {}): Promise<UpdateResult> {
+  async update(oldMemoryId: string, newContent: string, userId?: string, opts: WriteOptions = {}): Promise<UpdateResult> {
     return this.post(
       "/api/v1/memory/supersede",
       { user_id: this.uid(userId), old_memory_id: oldMemoryId, new_content: newContent },
@@ -1468,7 +1464,9 @@ export class Client {
    * "tone_stabilizer"; the service is the authority — an unknown name comes back with
    * the list it accepts). Returns the merged result.
    * `form`/`tz` render memory times (memoir/archive) on Scroll 1.2+, same as search/recall. */
-  engram(name: string, query: string, userId?: string, opts: { form?: string; tz?: number } = {}): Promise<EngramResult> {
+  async engram(name: string, query: string, userId?: string, opts: { form?: string; tz?: number } = {}): Promise<EngramResult> {
+    // `engram` takes the same two options as `recall`, so it gets the same guard.
+    checkOpts(opts, KNOWN_ENGRAM_KEYS, "engram");
     return this.post("/api/v1/engram/run", withForm({ name, user_id: this.uid(userId), query }, opts.form, opts.tz));
   }
   /** Recent conversation turns (short-term memory). */
@@ -1477,7 +1475,7 @@ export class Client {
     return asRecords<HistoryTurn>(r.turns);
   }
   /** Memory counts for a store: { total_memories, short_term_turns }. */
-  stats(userId?: string): Promise<StatsResult> {
+  async stats(userId?: string): Promise<StatsResult> {
     return this.post("/api/v1/memory/stats", { user_id: this.uid(userId) });
   }
 
@@ -1507,9 +1505,8 @@ export class Client {
    * `listMemories`: an id from another store, an internal record id, or an
    * invalidated memory rejects with `NotFoundError`. Pass `undefined` as `userId` for
    * the default store — it is positional here, not omittable as it is in Python. */
-  get(userId: string | undefined, memoryId: string): Promise<Memory> {
-    // Sync throw (same shape as `delete`), so a missing id fails loudly even
-    // when the caller forgets to await.
+  async get(userId: string | undefined, memoryId: string): Promise<Memory> {
+    // Refusals arrive as rejections, like every other method here.
     if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the id that add/store or listMemories returned.");
     }
@@ -1529,7 +1526,7 @@ export class Client {
    *       cursor = page.next_cursor;
    *     } while (cursor);
    */
-  listMemories(userId?: string, opts: { limit?: number; cursor?: string } = {}): Promise<MemoryPage> {
+  async listMemories(userId?: string, opts: { limit?: number; cursor?: string } = {}): Promise<MemoryPage> {
     const body: Record<string, unknown> = { user_id: this.uid(userId), limit: opts.limit ?? 100 };
     if (opts.cursor) body.cursor = opts.cursor;
     return this.post("/api/v1/memory/list", body);
@@ -1563,6 +1560,13 @@ export class Client {
     for await (const m of this.iterMemories(userId)) out.push(m);
     return out;
   }
+  /** Collect ALL of a store's image memories into an array — the image-side pair of
+   *  `exportMemories`. */
+  async exportImages(userId?: string, opts: { pageSize?: number } = {}): Promise<Memory[]> {
+    const out: Memory[] = [];
+    for await (const m of this.iterImages(userId, opts)) out.push(m);
+    return out;
+  }
   // ----- images (Tablet 2 and newer) -----
 
   /**
@@ -1587,7 +1591,7 @@ export class Client {
    *     const ext = contentType.split("/")[1];   // "webp" for a downscaled PNG
    *     await fs.writeFile(`image.${ext}`, bytes);
    */
-  getImage(userId: string | undefined, memoryId: string): Promise<ImageBytes> {
+  async getImage(userId: string | undefined, memoryId: string): Promise<ImageBytes> {
     if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the id that add/store or listImages returned.");
     }
@@ -1605,7 +1609,7 @@ export class Client {
    *     const p = await mem.forgetImage(undefined, id, { preview: true });
    *     if (p.memory_kept === false) { /* this would delete the whole memory *\/ }
    */
-  forgetImage(
+  async forgetImage(
     userId: string | undefined,
     memoryId: string,
     opts: { preview?: boolean } = {},
@@ -1627,7 +1631,7 @@ export class Client {
    * because several images can share a timestamp, and a timestamp alone would either
    * repeat them or skip them.
    */
-  listImages(
+  async listImages(
     userId?: string,
     opts: { limit?: number; before?: string; skipIds?: string[] } = {},
   ): Promise<ImagePage> {
@@ -1652,9 +1656,7 @@ export class Client {
       for (const m of asRecords<Memory>(p.images)) yield m;
       // `return`, not `break`: the throw below is the MAX_PAGES backstop, and a
       // `break` fell straight into it — so the ordinary end of a walk raised
-      // "the store did not end" on a store that had just ended. Python is safe
-      // here by using for/else and Rust by carrying an `ended` flag; TypeScript
-      // has neither, so the exit has to leave the function outright.
+      // "the store did not end" on a store that had just ended.
       if (!p.has_more || !p.next_before) return;
       // The cursor is the PAIR: several images can share a timestamp, so `before`
       // alone repeats across pages legitimately.
@@ -1714,7 +1716,7 @@ export class Client {
    * the address says so. The old path still answers, for clients published before
    * 2026-08-18, and both share one rate-limit budget.
    */
-  revisions(
+  async revisions(
     userId?: string,
     opts: {
       /**
@@ -1748,7 +1750,7 @@ export class Client {
    * say, and when did it change" — `revisions()` tells you HOW MUCH a store moved,
    * this tells you what happened to one fact.
    */
-  lineage(userId: string | undefined, memoryId: string): Promise<LineageResult> {
+  async lineage(userId: string | undefined, memoryId: string): Promise<LineageResult> {
     if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the memory whose history you want.");
     }
@@ -1766,7 +1768,7 @@ export class Client {
    * actually remove — usually more than `returned`, and worth showing to whoever is
    * about to confirm one.
    */
-  bySpeaker(
+  async bySpeaker(
     speaker: string,
     userId?: string,
     opts: { limit?: number; before?: string; skipIds?: string[] } = {},
@@ -1810,7 +1812,10 @@ export class Client {
    */
   async listEngrams(): Promise<EngramCatalog> {
     const data = await this.request("GET", "/api/v1/engram");
+    // Spread the reply first so fields this version does not name still reach the
+    // caller; only the promised shapes are normalised.
     return {
+      ...(data as Record<string, unknown>),
       engrams: asRecords<EngramInfo>(data.engrams),
       forms: asRecords<EngramInfo>(data.forms),
       // Present when the selected model has no engram support — the service explains
@@ -1824,7 +1829,7 @@ export class Client {
    * a store must exist before you `add` to or `search` it, otherwise those calls
    * return 404. Idempotent. Every account starts with a `default` store.
    * Returns `{ user_id, status }` (`status` is `"created"` or `"exists"`). */
-  createStore(userId?: string): Promise<StoreOpResult> {
+  async createStore(userId?: string): Promise<StoreOpResult> {
     return this.post("/api/v1/memory/collection", { user_id: this.uid(userId) });
   }
   /** List your stores: `[{ user_id, created_at }, ...]` (`default` first). */
@@ -1833,7 +1838,7 @@ export class Client {
     return asRecords<StoreInfo>(r.collections);
   }
   /** Delete a store and ALL its memories. Returns `{ user_id, status }`. */
-  deleteStore(userId: string): Promise<StoreOpResult> {
+  async deleteStore(userId: string): Promise<StoreOpResult> {
     // Validate before warning. The warning helper lowercases the id, so a non-string
     // reaches it and dies as "id.toLowerCase is not a function" — a TypeError from
     // inside the SDK instead of a sentence about the id.
@@ -1847,7 +1852,7 @@ export class Client {
   /** Register a person for this store. Speakers are explicit: register once, then
    * store with `{ speaker }`. `"me"` (the assistant itself) never needs
    * registration. A store registers up to 50 people to start. */
-  addSpeaker(speaker: string, userId?: string): Promise<SpeakerOpResult> {
+  async addSpeaker(speaker: string, userId?: string): Promise<SpeakerOpResult> {
     return this.post("/api/v1/memory/speakers", { user_id: this.uid(userId), speaker });
   }
   /** The store's registered people, each with its memory count. */
@@ -1859,14 +1864,14 @@ export class Client {
     return { ...r, speakers: asRecords(r?.speakers) } as SpeakersList;
   }
   /** Unregister a person. Their memories stay; the name tag goes. */
-  removeSpeaker(speaker: string, userId?: string): Promise<SpeakerOpResult> {
+  async removeSpeaker(speaker: string, userId?: string): Promise<SpeakerOpResult> {
     return this.request("DELETE", "/api/v1/memory/speakers", { user_id: this.uid(userId), speaker });
   }
 
   // ----- delete -----
   /** Delete a single memory by id. Pass `undefined` as `userId` for the default
    *  store — it is positional here, not omittable as it is in Python. */
-  delete(userId: string | undefined, memoryId: string): Promise<StatusResult> {
+  async delete(userId: string | undefined, memoryId: string): Promise<StatusResult> {
     // Guard: without a memory_id the API's forget endpoint means "delete the
     // whole store". An undefined/"" slipping in here must never become a wipe.
     //
@@ -1881,7 +1886,7 @@ export class Client {
   }
   /** Delete ALL memories for a store (GDPR erase). `userId` is required on purpose -
    * this is destructive, so it never falls back to the default store. */
-  deleteAll(userId: string): Promise<StatusResult> {
+  async deleteAll(userId: string): Promise<StatusResult> {
     if (typeof userId !== "string" || !userId.trim()) throw new Error("userId is required (a non-blank string) for deleteAll — anything else would wipe the default store.");
     // These two take the store id directly instead of going through uid(), so the
     // collision warning — the one that says `Alice.Smith` and `alice_smith` are ONE
@@ -1930,12 +1935,10 @@ export class Client {
     let budget = this.timeoutMs;
     if (deadlineAt !== undefined) {
       const left = deadlineAt - Date.now();
-      // Refuse rather than open a socket there is no time to use. Python's
-      // `_attempt_budget` and Rust's `attempt_budget` have raised here from the start.
-      // This path instead clamped the budget to 0 and began the attempt anyway, which
-      // left `setTimeout(…, 0)` — it fires on the next timer phase — racing a fetch
-      // that a fast server answers first. The same call then sometimes reported its
-      // deadline and sometimes returned a result: one run in three, measured.
+      // Refuse rather than open a socket there is no time to use. Clamping the budget
+      // to 0 and beginning the attempt anyway leaves `setTimeout(…, 0)` — it fires on
+      // the next timer phase — racing a fetch that a fast server answers first, so the
+      // same call sometimes reports its deadline and sometimes returns a result.
       if (left <= 0) throw new APIConnectionError(0, this.abortMessage("deadline"));
       if (left < budget) {
         budget = left;
@@ -2083,7 +2086,9 @@ export class Client {
           //  resolves, so they only ever reached the sites that were fixed.
           throw new APIConnectionError(0, this.abortMessage(att.why()));
         }
-        throw e;
+        if (e instanceof WosError) throw e; // the size cap — already the right error
+        // A body that stops arriving is a transport failure.
+        throw new APIConnectionError(0, `network error: ${e?.message ?? e}`);
       }
       if (buf.byteLength === 0) {
         // An empty 200 would otherwise read as "here is your image" and write a
@@ -2105,8 +2110,7 @@ export class Client {
     // `null` became the literal key "null" and passed the format check. A key read
     // from JSON or a database row arrives as null, not undefined, and every write on
     // that path then shared one key — the second onward returned the first response
-    // and stored nothing. Python guards with `is None`; Rust's Option makes it
-    // unrepresentable.
+    // and stored nothing.
     if (key === undefined || key === null) return undefined;
     if (!IDEMPOTENCY_KEY_RE.test(key)) {
       throw new Error(
@@ -2222,7 +2226,7 @@ export class Client {
         // Other network errors retry only when a retry can't double-process a
         // write: idempotent methods always; writes only for connect-level
         // failures (the request never reached the server). A mid-stream drop on
-        // a POST may already have stored + billed server-side.
+        // a POST may already have landed.
         const safe = IDEMPOTENT_METHODS.has(method.toUpperCase()) || isConnectFailure(e);
         if (!timedOut && safe && attempt + 1 < attempts) {
           const delay = this.backoffMs(attempt);
@@ -2272,8 +2276,17 @@ export class Client {
         }
         if (e instanceof WosError) throw e; // the size cap — already the right error
         // A drop while READING the body is a transport failure — surface it as
-        // APIConnectionError, not a raw fetch TypeError. Ambiguous, never retried.
-        throw new APIConnectionError(0, `network error: ${e?.message ?? e}`);
+        // APIConnectionError, not a raw fetch TypeError. Retried on an idempotent
+        // method, like every other connection failure: replaying a GET cannot
+        // double-process anything, while a write may already have landed.
+        if (!(IDEMPOTENT_METHODS.has(method.toUpperCase()) && attempt + 1 < attempts)) {
+          throw new APIConnectionError(0, `network error: ${e?.message ?? e}`);
+        }
+        att.clear();
+        const delay = this.backoffMs(attempt);
+        logDebug(`${method} ${logPath} — body dropped mid-stream, retrying in ${delay}ms (attempt ${attempt + 1}/${attempts})`);
+        await this.backoffSleep(delay, deadlineAt);
+        continue;
       } finally {
         att.clear();
       }

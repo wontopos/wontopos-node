@@ -71,7 +71,7 @@ test("search opts cannot override reserved fields (user_id / query / max_results
   }
 });
 
-test("POST write is NOT retried on 502 (no duplicate store / double bill)", async () => {
+test("POST write is NOT retried on 502 (no duplicate store)", async () => {
   const { server, seen, base } = await scriptedServer([[502, {}, '{"error":"bad gateway"}']]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
@@ -95,6 +95,47 @@ test("GET is retried on 503 (idempotent)", async () => {
     server.close();
   }
 });
+
+test("engram refuses an option it does not know", async () => {
+  // recall got this guard; engram takes the same two options and did not, so a
+  // typo was refused in Python and silently dropped here. `engram` is not async,
+  // so the guard throws before a promise exists — assert.throws, not rejects.
+  const mem = new Client({ apiKey: KEY });
+  await assert.rejects(
+        () => mem.engram("deep_recall", "q", "u", { fom: "memoir" }),
+    (e) => /unknown engram option/i.test(e.message) && /form/.test(e.message)
+  );
+});
+
+for (const status of [504, 408]) {
+  test(`GET is retried on ${status} (idempotent)`, async () => {
+    // The set used to hold 502/503 only. A gateway that stopped waiting (504) and
+    // an intermediary-authored 408 are the same ambiguity, and safe on a read.
+    const { server, seen, base } = await scriptedServer([
+      [status, { "Retry-After": "0" }, "{}"],
+      [200, {}, '{"models":[]}'],
+    ]);
+    try {
+      const mem = new Client({ apiKey: KEY, baseUrl: base });
+      await mem.listModels();
+      assert.equal(seen.length, 2);
+    } finally {
+      server.close();
+    }
+  });
+
+  test(`POST write is NOT retried on ${status}`, async () => {
+    // Widening the set must not start retrying writes.
+    const { server, seen, base } = await scriptedServer([[status, {}, '{"error":"gateway"}']]);
+    try {
+      const mem = new Client({ apiKey: KEY, baseUrl: base });
+      await assert.rejects(mem.add("hi", "u"), (e) => e.status === status);
+      assert.equal(seen.length, 1);
+    } finally {
+      server.close();
+    }
+  });
+}
 
 test("maxRetries: NaN falls back to default (still makes the request)", async () => {
   const { server, seen, base } = await scriptedServer([[200, {}, '{"memories":[]}']]);
@@ -165,8 +206,8 @@ test("iterMemories stops when the server repeats a cursor (no infinite loop)", a
 test("the v6 loopback is loopback — no plaintext warning", () => {
   // `new URL("http://[::1]:1").hostname` is "[::1]", brackets included, and the
   // loopback set holds "::1". So a client on the v6 loopback was warned
-  // that its key travelled in cleartext, which was false. Python and Rust both strip
-  // the brackets; this was the copy that did not.
+  // that its key travelled in cleartext, which was false. The brackets have to come
+  // off before the comparison.
   const warns = [];
   const save = console.warn;
   console.warn = (m) => warns.push(String(m));
@@ -283,10 +324,10 @@ test("withUser and the constructor refuse an unusable store id, like add() does"
   assert.equal(mem.withModel("tablet-2").toJSON().userId, "tenant-A");
 });
 
-test("deleteAll rejects blank/whitespace userId (would wipe the default store)", () => {
+test("deleteAll rejects blank/whitespace userId (would wipe the default store)", async () => {
   const mem = new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9" });
   for (const uid of ["", " ", "\t", "\n", "   "]) {
-    assert.throws(() => mem.deleteAll(uid), /non-blank/);
+    await assert.rejects(() => mem.deleteAll(uid), /non-blank/);
   }
 });
 
@@ -334,10 +375,10 @@ test("refuses redirects", async () => {
 
 test("delete requires memoryId; deleteAll/deleteStore require userId", async () => {
   const mem = new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9" }); // never reached
-  assert.throws(() => mem.delete("alice", ""), /memoryId is required/);
-  assert.throws(() => mem.delete("alice", undefined), /memoryId is required/);
-  assert.throws(() => mem.deleteAll(""), /userId is required/);
-  assert.throws(() => mem.deleteStore(""), /userId is required/);
+  await assert.rejects(() => mem.delete("alice", ""), /memoryId is required/);
+  await assert.rejects(() => mem.delete("alice", undefined), /memoryId is required/);
+  await assert.rejects(() => mem.deleteAll(""), /userId is required/);
+  await assert.rejects(() => mem.deleteStore(""), /userId is required/);
 });
 
 test("key is masked in toJSON and inspect", () => {
@@ -538,7 +579,7 @@ test("get() fetches one memory by id and unwraps it; empty id throws before the 
     const m = await mem.get("u", "9b2d");
     assert.equal(m.content, "tea");
     assert.equal(JSON.parse(seen[0].body).memory_id, "9b2d");
-    assert.throws(() => mem.get("u", ""), /memoryId is required/);
+    await assert.rejects(() => mem.get("u", ""), /memoryId is required/);
   } finally {
     server.close();
   }
@@ -602,7 +643,7 @@ test("typed responses: search returns Memory[], listSpeakers always has speakers
   }
 });
 
-test("revisions goes to the Won surface, not the memory plane", async () => {
+test("revisions goes to /api/v1/won, not /api/v1/memory", async () => {
   // Won is a separate address, not a rename: calls a model makes ABOUT its memory live
   // under /api/v1/won/*. The old /memory path still answers, so a drift back here fails
   // nothing at runtime — it just makes the docs teach an address the SDK never calls.
@@ -812,11 +853,11 @@ test("internal plumbing is not part of the published type surface", () => {
   assert.match(dts, /\bsearch\(/, "the real surface is still declared");
 });
 
-// `retries` (Python) and `maxRetries` (TypeScript) are one option that had two names.
-// The docs say the three SDKs ship together as "one surface", yet porting Python to
-// TypeScript meant TypeScript ignored the unknown key on the options object at runtime —
-// with no error — so **the retry setting vanished silently.** A quiet failure like that
-// was never going to be found.
+// `retries` and `maxRetries` are one option that had two names. The SDKs ship as one
+// surface, so code ported between them names this setting either way — and a name that
+// is not recognised is worse than an error here: an options object drops an unknown key
+// at runtime, with nothing raised, and **the retry setting vanishes silently.** Both
+// names are accepted.
 test("retries: the Python name works too, and disables retries when 0", async () => {
   const { server, seen, base } = await scriptedServer([[503, {}, "{}"]]);
   try {
@@ -914,10 +955,8 @@ test("duplicate: duplicate_of arrives as a typed field", async () => {
   }
 });
 
-// The three SDKs treated a body-less response differently: on the same `204 No Content`
-// TypeScript succeeded with `{}` while Python and Rust raised "invalid JSON". They ship
-// as one surface, so both directions are settled — a body may be absent only when the
-// status code says so (204/205/304).
+// A response with no body needs one answer, and both directions are settled here — a
+// body may be absent only when the status code says so (204/205/304).
 test("204 No Content is a success, not a parse error", async () => {
   const { server, base } = await scriptedServer([[204, {}, ""]]);
   try {
@@ -1249,7 +1288,7 @@ test("an id that does not fold is neither recorded nor warned about", async () =
 // Four findings that reproduced. Each is pinned here because each was a guard that
 // existed and did not cover the case that mattered.
 
-test("a whitespace memory id cannot become a whole-store wipe", () => {
+test("a whitespace memory id cannot become a whole-store wipe", async () => {
   // delete_all already trimmed; delete did not. "   " is truthy, so it passed the
   // emptiness check and travelled as memory_id — and a server that trims it back to
   // nothing reads the request as the delete-everything form.
@@ -1257,7 +1296,7 @@ test("a whitespace memory id cannot become a whole-store wipe", () => {
   // The guard throws SYNCHRONOUSLY on purpose — the SDK does that so a missing id
   // fails loudly even when the caller forgets to await. assert.rejects would not catch it.
   for (const bad of ["", "   ", "\t\n"]) {
-    assert.throws(() => mem.delete("store", bad), /non-blank/);
+    await assert.rejects(() => mem.delete("store", bad), /non-blank/);
   }
 });
 
@@ -1268,7 +1307,7 @@ test("a store id that was PASSED but is blank throws instead of using the defaul
   const mem = new Client({ apiKey: "wos-live-x", userId: "fallback", baseUrl: "http://127.0.0.1:9" });
   // add() is not async, so its guard throws synchronously; search() is async, so the
   // same guard surfaces as a rejection. Both must refuse — the shape differs by method.
-  assert.throws(() => mem.add("hi", "  "), /blank/);
+  await assert.rejects(() => mem.add("hi", "  "), /blank/);
   await assert.rejects(() => mem.search("q", ""), /blank/);
 });
 
@@ -1292,7 +1331,7 @@ test("a store id that is not a usable string throws instead of using the default
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base, userId: "fallback" });
     for (const bad of [null, 0, 42, false, [], {}]) {
-      assert.throws(() => mem.add("hi", bad), /non-blank string/, `add(${JSON.stringify(bad)})`);
+      await assert.rejects(() => mem.add("hi", bad), /non-blank string/, `add(${JSON.stringify(bad)})`);
     }
     assert.equal(seen.length, 0, "none of them may reach the wire");
     // The documented shortcut must still work: omitted means the client default.
@@ -1305,11 +1344,11 @@ test("a store id that is not a usable string throws instead of using the default
   }
 });
 
-test("the destructive calls refuse a non-string id too", () => {
+test("the destructive calls refuse a non-string id too", async () => {
   const mem = new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9", userId: "fallback" });
   for (const bad of [null, 0, undefined, [], {}]) {
-    assert.throws(() => mem.deleteAll(bad), /non-blank string/);
-    assert.throws(() => mem.deleteStore(bad), /non-blank string/);
+    await assert.rejects(() => mem.deleteAll(bad), /non-blank string/);
+    await assert.rejects(() => mem.deleteStore(bad), /non-blank string/);
   }
 });
 
@@ -1702,6 +1741,81 @@ test("a misspelled search option is refused before the wire", async () => {
     const body = JSON.parse(seen[0].body);
     assert.equal(body.future_option, 1);
     assert.equal("extra" in body, false, "the wrapper itself must not travel");
+  } finally {
+    server.close();
+  }
+});
+
+test("an argument the client refuses arrives as a rejection, never as a synchronous throw", async () => {
+  // `mem.delete(uid, "").catch(handle)` never reached `handle`: the guard ran before a
+  // promise existed, so the throw escaped the promise chain and took the process with
+  // it. `recall` and `usage` had been made async for exactly this reason and nothing
+  // else had. One call could answer both ways — a bad `image` threw while a bad
+  // idempotency key rejected, because one guard ran outside the async body and one in.
+  const mem = new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9" }); // never reached
+  const calls = [
+    ["delete", () => mem.delete("alice", "")],
+    ["deleteAll", () => mem.deleteAll("")],
+    ["deleteStore", () => mem.deleteStore("")],
+    ["get", () => mem.get("alice", "")],
+    ["getImage", () => mem.getImage("alice", "")],
+    ["forgetImage", () => mem.forgetImage("alice", "")],
+    ["lineage", () => mem.lineage("alice", "")],
+    ["add", () => mem.add("hi", "   ")],
+    ["engram", () => mem.engram("deep_recall", "q", "u", { fom: "memoir" })],
+    ["add (bad image)", () => mem.add("hi", "alice", {}, { image: { data: 5 } })],
+    ["add (bad key)", () => mem.add("hi", "alice", {}, { idempotencyKey: "no spaces allowed" })],
+  ];
+  for (const [name, call] of calls) {
+    let sync = null;
+    try {
+      const p = call();
+      assert.ok(p && typeof p.then === "function", `${name} did not return a promise`);
+      await p.then(() => assert.fail(`${name} resolved`), () => {});
+    } catch (e) {
+      sync = e;
+    }
+    assert.equal(sync, null, `${name} threw synchronously: .catch() would not see it`);
+  }
+});
+
+test("no promise-returning method is left synchronous", async () => {
+  // `revisions` was the one the conversion missed: its parameter list carries doc
+  // comments, so the `): Promise<` that marks it sat past the window the sweep read.
+  // Reading the source rather than a list is the point — a method added later gets
+  // checked without anyone remembering to add it here.
+  const src = readFileSync(new URL("../src/wontopos.ts", import.meta.url), "utf8");
+  const lines = src.split("\n");
+  const missed = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^  ([a-z][A-Za-z0-9_]*)\(/.exec(lines[i]);
+    if (!m) continue;
+    const head = lines[i].trimStart();
+    if (/^(async|get |set |private|static|constructor)/.test(head)) continue;
+    // Look ahead to the end of the signature, however many lines it takes.
+    const ahead = lines.slice(i, i + 60).join("\n");
+    const sig = ahead.slice(0, ahead.indexOf(" {\n") + 1);
+    if (/\)\s*:\s*Promise</.test(sig)) missed.push(`${m[1]} (line ${i + 1})`);
+  }
+  assert.deepEqual(missed, [], `these return a promise and throw synchronously: ${missed.join(", ")}`);
+});
+
+test("listEngrams keeps a field this version does not name", async () => {
+  // It rebuilt the reply into three keys, so a field the service added never reached
+  // the caller — no error, no log, nothing to notice. Responses widen; only the shapes
+  // this method promises are normalised.
+  const { server, base } = await scriptedServer([[200, {}, JSON.stringify({
+    engrams: [{ name: "deep_recall" }],
+    forms: [{ name: "memoir" }],
+    note: null,
+    a_field_added_later: { n: 7 },
+  })]]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    const r = await mem.listEngrams();
+    assert.deepEqual(r.a_field_added_later, { n: 7 }, "a field added later was dropped");
+    assert.equal(r.engrams[0].name, "deep_recall", "the named shape still normalises");
+    assert.equal(r.note, undefined, "a non-string note is still undefined");
   } finally {
     server.close();
   }
