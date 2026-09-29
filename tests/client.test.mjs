@@ -585,6 +585,53 @@ test("get() fetches one memory by id and unwraps it; empty id throws before the 
   }
 });
 
+test("get() takes the row itself when the model answers without a memory wrapper", async () => {
+  const { server, base } = await scriptedServer([
+    [200, {}, '{"id":"9b2d","content":"tea","is_superseded":false}'],
+    [200, {}, '{"user_id":"u","memory":null}'],
+  ]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    const m = await mem.get("u", "9b2d");
+    assert.equal(m.content, "tea");
+    assert.equal(m.id, "9b2d");
+    assert.deepEqual(await mem.get("u", "9b2d"), {});
+  } finally {
+    server.close();
+  }
+});
+
+test("search, searchSelf and searchFull send form and tz", async () => {
+  const ok = [200, {}, '{"memories":[]}'];
+  const { server, seen, base } = await scriptedServer([ok, ok, ok]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.search("q", "alice", 10, { form: "memoir", tz: 9 });
+    await mem.searchSelf("q", "alice", 10, { form: "archive", tz: -5 });
+    await mem.searchFull("q", "alice", 10, { form: "memoir", tz: 0 });
+    const sent = seen.map((r) => JSON.parse(r.body));
+    assert.deepEqual(sent.map((b) => [b.form, b.tz]), [["memoir", 9], ["archive", -5], ["memoir", 0]]);
+  } finally {
+    server.close();
+  }
+});
+
+test("search() returns image rows after the text, each id once", async () => {
+  const body = JSON.stringify({
+    memories: [{ id: "m1" }, { id: "dup" }],
+    self_memories: [{ id: "s1" }],
+    images: [{ id: "dup" }, { id: "i1", content: "", image_ref: "r" }],
+  });
+  const { server, base } = await scriptedServer([[200, {}, body], [200, {}, body]]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    assert.deepEqual((await mem.search("q", "alice")).map((m) => m.id), ["m1", "dup", "s1", "i1"]);
+    assert.deepEqual(Object.keys(await mem.searchSelf("q", "alice")).sort(), ["memories", "self_memories"]);
+  } finally {
+    server.close();
+  }
+});
+
 test("a hostile server's giant error body is capped in the message", async () => {
   const { server, base } = await scriptedServer([[400, {}, JSON.stringify({ error: "Z".repeat(100000) })]]);
   try {
@@ -1049,10 +1096,7 @@ test("search filters reach the API (they were in neither the spec nor any SDK)",
 
 // ── 2.2.25: what the attack and bug hunts turned up ─────────────────────────
 
-test("store id collision — warn when two end users fold into one store", async () => {
-  // Measured against production: what was stored under alice-smith comes back from a
-  // search on alice_smith and on Alice.Smith. In an app with one store per end user,
-  // bob.lee@x and bob-lee@x become one person.
+test("store id normalization: one warning naming the normalized form", async () => {
   const { _resetStoreIdWarnings } = await import("../dist/wontopos.js");
   const { server, base } = await scriptedServer([[200, {}, "{}"]]);
   const warns = [];
@@ -1065,7 +1109,44 @@ test("store id collision — warn when two end users fold into one store", async
     assert.equal(warns.length, 1, "exactly one warning");
     assert.match(warns[0], /Alice\.Smith/);
     assert.match(warns[0], /alice_smith/);
-    assert.match(warns[0], /share ONE store/);
+    assert.match(warns[0], /cannot be created beside it \(409\)/);
+  } finally {
+    console.warn = orig;
+    server.close();
+  }
+});
+
+test("add refuses a metadata key that names a store, before sending", async () => {
+  const { server, seen, base } = await scriptedServer([[200, {}, '{"id":"m1","status":"stored"}']]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    for (const md of [{ userId: "bob" }, { store_id: "t" }, { "Idempotency-Key": "k" }, { USER_ID: "x" }]) {
+      await assert.rejects(mem.add("x", "alice", md), /not a metadata field/);
+    }
+    assert.equal(seen.length, 0);
+    await mem.add("bought milk", "alice", { store: "Costco", user_id_2: "b", model: "m" });
+    assert.equal(seen.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("an id the API does not accept gets its own warning, naming the 400", async () => {
+  const { _resetStoreIdWarnings } = await import("../dist/wontopos.js");
+  const { server, base } = await scriptedServer([[200, {}, "{}"], [200, {}, "{}"], [200, {}, "{}"]]);
+  const warns = [];
+  const orig = console.warn;
+  console.warn = (...a) => warns.push(a.join(" "));
+  try {
+    _resetStoreIdWarnings();
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    for (const bad of ["bob.lee@example.com", "_alice", "x".repeat(65)]) await mem.add("x", bad);
+    assert.equal(warns.length, 3);
+    for (const w of warns) {
+      assert.match(w, /is not a valid store id/);
+      assert.match(w, /refused \(400\)/);
+      assert.doesNotMatch(w, /409/);
+    }
   } finally {
     console.warn = orig;
     server.close();
@@ -1236,7 +1317,7 @@ test("a non-function fetch is refused at construction, not at the first call", (
 });
 
 // --- bound on the store-id warning record ----------------------------------
-// The warning fires on ids that fold, i.e. email-shaped ones. But the pattern this
+// The warning fires on ids whose normalized form differs. The pattern this
 // SDK recommends is one store per end user, so without a cap the record grows one
 // entry per user and is never released for the life of the process — a leak in the
 // very case the warning describes.
@@ -1447,9 +1528,9 @@ test("searchFull keeps what search merges away (images, verify_used)", async () 
     assert.equal(sent.max_images, 3);
     assert.equal(sent.verify, 2);
 
-    // And the merged call is unchanged: one list, no images, no verify_used.
+    // The merged call carries the photos too, after the text.
     const merged = await mem.search("q", "alice");
-    assert.deepEqual(merged.map((m) => m.id), ["m1", "s1"]);
+    assert.deepEqual(merged.map((m) => m.id), ["m1", "s1", "i1"]);
   } finally {
     server.close();
   }
@@ -1546,9 +1627,9 @@ test("replayed never overwrites a field the service actually sent", async () => 
     // These bodies are widening — a response may carry fields this client has
     // never seen. If a name ever collides, the service's value is the true one
     // and ours is a guess.
-    const said = await mem.add("x", "alice", { idempotencyKey: "k1" });
+    const said = await mem.add("x", "alice", {}, { idempotencyKey: "k1" });
     assert.equal(said.replayed, false, "the service said false; we must not flip it");
-    const silent = await mem.add("x", "alice", { idempotencyKey: "k2" });
+    const silent = await mem.add("x", "alice", {}, { idempotencyKey: "k2" });
     assert.equal(silent.replayed, true, "the service said nothing; the header answers");
   } finally {
     server.close();

@@ -41,7 +41,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.39";
+const VERSION = "2.2.40";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -92,33 +92,20 @@ const MAX_ERR_MSG = 4096;
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:\-]{1,128}$/;
 
 /**
- * The API normalizes a store id: lowercased, and every character outside
- * `[a-z0-9_]` becomes `_`. So `Alice.Smith`, `alice-smith` and `alice_smith` are
- * ALL the same store.
- *
- * That is a data-exposure hazard for the most common way this SDK is used — one
- * store per end user. Two accounts whose ids differ only by punctuation or case
- * (`bob.lee@x.com` / `bob-lee@x.com`) silently share every memory, and nothing in
- * the response says so: the note only appears when `createStore` creates one, and
- * an app that reuses an existing store never sees it.
- *
- * We cannot refuse the id — the API accepts it, and callers may have written it
- * this way for a year. So we say it once, loudly, at the moment it happens.
+ * A store id is 1-64 ASCII letters, digits, `.`, `_` and `-`, starting with a letter or
+ * digit. Creating any other id (an email address, a name in another script) is refused
+ * (400), so key stores on an id of your own. Store ids compare without regard to case:
+ * `Alice` and `alice` name one store. Ids that differ only in `.`, `_` or `-` cannot
+ * both exist: once `alice-smith` exists, creating `alice.smith` is refused (409) and
+ * using it answers 404. With one store per end user, derive the ids so two users never
+ * differ only in those three characters.
  */
 function normalizeStoreId(id: string): string {
   return id.toLowerCase().replace(/[^a-z0-9_]/g, "_");
 }
-/** Ids already warned about, so each is reported once.
- *
- *  Bounded on purpose. The warning fires on ids that fold, and the shape it exists
- *  to catch is an email — which this SDK's own documented pattern ("one store per
- *  end user") turns into one entry PER USER, held for the life of the process and
- *  never released, even when the client is. A server that forwards 50,000 distinct user
- *  ids would grow this to 50,000 entries, leaking in exactly the case the warning
- *  exists to catch. A `Set`
- *  keeps insertion order, so the oldest entry is the one evicted; dropping the
- *  oldest rather than refusing new ones means a collision that first shows up late
- *  still gets its one warning. */
+/** Ids already warned about, so each is reported once. Bounded: with one store per end
+ *  user it sees one id per user, so past the cap the oldest entry is evicted and an id
+ *  that first shows up late still gets its warning. */
 const WARNED_STORE_IDS_MAX = 1024;
 /** A store id is usable when it was omitted, or is a non-blank string.
  *
@@ -139,20 +126,44 @@ const WARNED_FILTER_KEYS_MAX = 1024;
 const warnedStoreIds = new Set<string>();
 function warnIfStoreIdCollapses(id: string): void {
   if (!id || warnedStoreIds.has(id)) return;
+  const valid = STORE_ID_FORMAT.test(id);
   const normalized = normalizeStoreId(id);
-  if (normalized === id) return;
+  if (valid && normalized === id) return;
   warnedStoreIds.add(id);
   while (warnedStoreIds.size > WARNED_STORE_IDS_MAX) {
     const oldest = warnedStoreIds.values().next().value;
     if (oldest === undefined) break;
     warnedStoreIds.delete(oldest);
   }
+  if (!valid) {
+    console.warn(
+      `wontopos: store id ${JSON.stringify(id)} is not a valid store id: use 1-64 ASCII letters, ` +
+        `digits, ".", "_" and "-", starting with a letter or digit. Creating it is refused (400).`,
+    );
+    return;
+  }
   console.warn(
-    `wontopos: store id ${JSON.stringify(id)} is stored as ${JSON.stringify(normalized)} ` +
-      `(lowercased, and anything outside [a-z0-9_] becomes "_"). Ids that differ only by case or ` +
-      `punctuation share ONE store and therefore one set of memories — if these ids come from your ` +
-      `end users, normalize them yourself first so two people can never collide.`,
+    `wontopos: store id ${JSON.stringify(id)} normalizes to ${JSON.stringify(normalized)}. ` +
+      `Ids that differ only by case name this same store; one that differs only by punctuation ` +
+      `cannot be created beside it (409) and is not found when used (404). If these ids come from ` +
+      `your end users, normalize them yourself first so two people never compete for one name.`,
   );
+}
+/** The store ids the API accepts. */
+const STORE_ID_FORMAT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** Metadata keys that spell a store id or the idempotency key, compared in any case with
+ *  spaces, `_`, `-` and `.` ignored. Those values have their own parameters. */
+const NOT_METADATA = new Set(["userid", "storeid", "idempotencykey"]);
+function checkMetadataKeys(metadata: unknown): void {
+  if (metadata == null || typeof metadata !== "object") return;
+  for (const k of Object.keys(metadata)) {
+    if (NOT_METADATA.has(k.toLowerCase().replace(/[\s_.-]/g, ""))) {
+      throw new Error(
+        `${JSON.stringify(k)} is not a metadata field: pass the store as userId and an ` +
+          `idempotency key as opts.idempotencyKey. Nothing was sent.`,
+      );
+    }
+  }
 }
 /** Test hook — the warn-once set is process-global by design. */
 export function _resetStoreIdWarnings(): void {
@@ -326,24 +337,27 @@ const asObj = <T>(x: unknown): T => (x != null && typeof x === "object" && !Arra
 // bad element never poisons the batch (and never destroys it).
 const asRecords = <T>(x: unknown): T[] =>
   asList<unknown>(x).filter((m): m is T => m != null && typeof m === "object" && !Array.isArray(m));
+// `get` answers `{memory: {...}}` on some models and the row itself on others.
+const memoryFromGet = (r: unknown): Memory => {
+  const o = asObj<Record<string, unknown>>(r);
+  if (o.memory != null && typeof o.memory === "object" && !Array.isArray(o.memory)) return o.memory as Memory;
+  return typeof o.id === "string" ? (o as unknown as Memory) : ({} as Memory);
+};
 
-/** Every memory a search returned, from both fields, as one array.
- *
- * Some models answer with the assistant's own words in `self_memories`, not
- * repeated in `memories`. `search()` used to return `memories` alone, so an
- * assistant turn stored with `addTurn` was missing from its results on those
- * models while the same query returned it on others — upgrading made search
- * return LESS, and what went missing had already been retrieved and paid for.
- *
- * Both fields are returned here, de-duplicated by id, each memory keeping its
- * `speaker` so a caller can still tell who said what. Callers who want them kept
- * apart use `searchSelf()`, which is what that method is for. */
-function mergeResults(r: { memories?: unknown; self_memories?: unknown }): Memory[] {
-  const main = asRecords<Memory>(r?.memories);
-  const mine = asRecords<Memory>(r?.self_memories);
-  if (mine.length === 0) return main;
-  const seen = new Set(main.map((m) => m.id).filter((id): id is string => typeof id === "string"));
-  return main.concat(mine.filter((m) => !(typeof m.id === "string" && seen.has(m.id))));
+/** Every memory a search returned — `memories`, then `self_memories`, then
+ * `images` — as one array, de-duplicated by id. Each keeps its `speaker` and, for a
+ * photo, its `image_ref`, so a caller can still tell them apart. */
+function mergeResults(r: { memories?: unknown; self_memories?: unknown; images?: unknown }): Memory[] {
+  const out = asRecords<Memory>(r?.memories);
+  const seen = new Set(out.map((m) => m.id).filter((id): id is string => typeof id === "string"));
+  for (const m of [...asRecords<Memory>(r?.self_memories), ...asRecords<Memory>(r?.images)]) {
+    if (typeof m.id === "string") {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+    }
+    out.push(m);
+  }
+  return out;
 }
 
 /** Attach a delivery-form override ("memoir"/"archive") + tz to a request body, the
@@ -379,9 +393,10 @@ export class AuthenticationError extends WosError {}
 export class PaymentRequiredError extends WosError {}
 /** 403 — the key/model isn't allowed to do this. */
 export class PermissionDeniedError extends WosError {}
-/** 404 — the store or resource doesn't exist (create the store first). */
+/** 404 — the store or resource doesn't exist. */
 export class NotFoundError extends WosError {}
-/** 409 — a concurrent write to the same store. Retry. */
+/** 409 — another write to this store was in flight (nothing was stored; retry), or the
+ *  store id collides with an existing store's (permanent). */
 export class ConflictError extends WosError {}
 /** 429 — too many requests. Back off and retry (the client already retries these). */
 export class RateLimitError extends WosError {}
@@ -490,6 +505,8 @@ export interface StatusResult {
 
 /**
  * An image attached to a memory, passed to `add`/`store` via `opts.image`.
+ *
+ * Both edges must be 700px or more; a smaller image is refused (400).
  *
  * What the service keeps is NOT your original. An image whose long edge is over
  * 1568px is downscaled to 1568 before anything else happens, and that smaller
@@ -630,8 +647,8 @@ export interface LineageResult {
 export interface SpeakerPage {
   speaker?: string;
   memories: Memory[];
-  /** How many underlying records a delete would actually remove, beyond what was returned. */
   chunks?: number;
+  /** The count to show before anyone confirms a delete of this speaker's memories. */
   points_to_delete?: number;
   returned?: number;
   has_more?: boolean;
@@ -648,20 +665,17 @@ export interface UpdateResult {
   [key: string]: unknown;
 }
 
-/** `searchFull` → everything one search answered with, not just the merged memories.
- *
- *  `search` returns the memories and nothing else, which is the right answer for
- *  almost every call. Two options make it the wrong one: `max_images` asks for
- *  photos, which arrive in their own field, and `verify` is reported on by
- *  `verify_used`. Merging away both means paying for a
- *  search you shaped and never seeing what came of it. */
+/** `searchFull` → everything one search answered with. `search` returns every memory
+ *  as one array; this keeps the fields apart and adds `verify_used`, the report on
+ *  the `verify` option. */
 export interface SearchResult {
   /** What others said, and general memories. */
   memories: Memory[];
   /** The assistant's own words (speaker "me"); `[]` on a model that does not keep
    *  them apart. */
   self_memories: Memory[];
-  /** Image memories, when `max_images` asked for any; `[]` otherwise. */
+  /** Image memories the answer carried (one by default on an image-capable model,
+   *  up to `max_images`); `[]` when there were none. */
   images: Memory[];
   /** Re-ask passes actually performed. Present only when `verify` was sent; lower
    *  than you asked for means the store had nothing further to add. */
@@ -763,19 +777,22 @@ export interface EngramCatalog {
 
 /** `createStore` / `deleteStore` → `{ user_id, status }`. */
 export interface StoreOpResult {
-  /** The store id the API actually used — NOT necessarily the one you sent.
-   *  Ids are normalized (see the `note`), so compare this against your input. */
+  /** The store id. `createStore` answers with the id as you sent it. */
   user_id?: string;
+  /** The normalized form the store is filed under, when it differs from `user_id`. */
+  canonical_id?: string;
   status?: string;
-  /** Present when the API changed your id, explaining how. Read it: two of your
-   *  end users can land in one store if their ids differ only by punctuation. */
+  /** Present when the API filed your id under a normalized form, explaining how. */
   note?: string;
   [key: string]: unknown;
 }
 
 export interface StoreInfo {
+  /** The id the store was created with — pass it back as `userId`. */
   user_id: string;
   created_at: string;
+  /** The normalized form the store is filed under, when it differs from `user_id`. */
+  canonical_id?: string;
   [key: string]: unknown;
 }
 
@@ -839,7 +856,7 @@ const KNOWN_FILTER_KEYS = new Set([
 ]);
 const warnedFilterKeys = new Set<string>();
 const KNOWN_SEARCH_KEYS = new Set([
-  "cache_control", "speaker", "filters", "verify", "max_images", "extra",
+  "cache_control", "speaker", "filters", "verify", "max_images", "form", "tz", "extra",
 ]);
 /** Named arguments of the call. Reaching the body through options would let forwarded
  *  input choose someone else's store. */
@@ -966,11 +983,15 @@ export interface SearchOptions {
    * than answering with no images.
    */
   max_images?: number;
+  /** Delivery form, "memoir" or "archive" (Scroll 1.2+): how each memory's time is
+   *  rendered. The service refuses an unknown one (400). */
+  form?: string;
+  /** Your UTC offset in hours, for rendering times in `form`. */
+  tz?: number;
   /**
    * Fields the service accepts that this version does not know about, merged into the
-   * request as written. Every other key is refused, so a typo cannot reach the wire —
-   * `verfy: 3` used to be sent, dropped by the service, and answered normally, leaving
-   * a caller billed for one pass believing they had bought three.
+   * request as written. Every other key is refused, so a typo cannot reach the wire.
+   * The store, the query and the count always win over a copy in here.
    */
   extra?: Record<string, unknown>;
 }
@@ -1322,6 +1343,7 @@ export class Client {
    * `opts.idempotencyKey`: see {@link WriteOptions} — pass one to make YOUR retry
    * of this exact write safe to repeat. */
   async add(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
+    checkMetadataKeys(metadata);
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, metadata };
     if (opts.image !== undefined) body.image = normalizeImage(opts.image);
     return this.post("/api/v1/memory/store", body, opts.idempotencyKey);
@@ -1363,12 +1385,11 @@ export class Client {
    *  a call that passes no count is unaffected. Before 2.2.35 the count was sent on
    *  unchecked.
    *
-   *  `limit` bounds `memories`, not the returned array. On a model that keeps the
-   *  assistant's own words separate (Scroll 1.2+) those come back as well, so the
-   *  array can hold more than `limit`. They were retrieved and billed either way;
-   *  dropping them would only hide what you already paid for. Size a prompt window
-   *  on the array you get back, not on `limit`. `searchSelf()` hands the two back
-   *  apart. */
+   *  `limit` bounds `memories`, not the returned array. The assistant's own words
+   *  (Scroll 1.2+) and image memories (Tablet 2+, one unless `max_images` says
+   *  otherwise) come back in it as well, so it can hold more than `limit`. They are
+   *  billed either way. Size a prompt window on the array you get back, not on
+   *  `limit`. `searchFull()` hands the fields back apart. */
   async search(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<Memory[]> {
     // Reserved fields win over ...opts: an app that forwards untrusted input as
     // opts must not be able to override the store (user_id), query, or limit.
@@ -1383,7 +1404,8 @@ export class Client {
    * `{ memories, self_memories }` — `memories` is what others said and general
    * memories, `self_memories` is the assistant's OWN words (stored with speaker
    * "me"), kept apart so whoever reads them never confuses who said what. On a model
-   * that does not keep them apart, `self_memories` is `[]`. `userId` may be omitted. */
+   * that does not keep them apart, `self_memories` is `[]`. Image memories are not
+   * included; `search` and `searchFull` carry them. `userId` may be omitted. */
   async searchSelf(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<SelfSearchResult> {
     checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
@@ -1400,7 +1422,7 @@ export class Client {
    *
    *     const r = await mem.searchFull("the day we moved", "alice", 10,
    *                                    { max_images: 3, verify: 2 });
-   *     r.images.length;   // the photos, which `search` drops
+   *     r.images.length;   // the photos, apart from the text memories
    *     r.verify_used;     // how many re-ask passes actually ran (you are billed per pass)
    *
    * Both options need Tablet 2 or newer and are refused (403) on an older engine
@@ -1510,9 +1532,7 @@ export class Client {
     if (typeof memoryId !== "string" || !memoryId.trim()) {
       throw new Error("memoryId is required — the id that add/store or listMemories returned.");
     }
-    return this.post("/api/v1/memory/get", { user_id: this.uid(userId), memory_id: memoryId.trim() }).then(
-      (r) => asObj<Memory>(r.memory)
-    );
+    return this.post("/api/v1/memory/get", { user_id: this.uid(userId), memory_id: memoryId.trim() }).then(memoryFromGet);
   }
   /** List a store's stored memories — the text you stored, plus its metadata.
    * Paginated: pass the returned `next_cursor` back as `cursor` for the next
@@ -1764,9 +1784,8 @@ export class Client {
    * assistant's own words, otherwise a person's name. Same cursor paging as
    * `listImages`.
    *
-   * `chunks` / `points_to_delete` report how many internal records a delete would
-   * actually remove — usually more than `returned`, and worth showing to whoever is
-   * about to confirm one.
+   * `points_to_delete` is the count to show before anyone confirms a delete of this
+   * speaker's memories.
    */
   async bySpeaker(
     speaker: string,
@@ -1832,7 +1851,8 @@ export class Client {
   async createStore(userId?: string): Promise<StoreOpResult> {
     return this.post("/api/v1/memory/collection", { user_id: this.uid(userId) });
   }
-  /** List your stores: `[{ user_id, created_at }, ...]` (`default` first). */
+  /** List your stores: `[{ user_id, created_at, canonical_id? }, ...]` (`default`
+   *  first). Each `user_id` is the id the store was created with. */
   async listStores(): Promise<StoreInfo[]> {
     const r = await this.request("GET", "/api/v1/memory/collections");
     return asRecords<StoreInfo>(r.collections);
@@ -1888,10 +1908,7 @@ export class Client {
    * this is destructive, so it never falls back to the default store. */
   async deleteAll(userId: string): Promise<StatusResult> {
     if (typeof userId !== "string" || !userId.trim()) throw new Error("userId is required (a non-blank string) for deleteAll — anything else would wipe the default store.");
-    // These two take the store id directly instead of going through uid(), so the
-    // collision warning — the one that says `Alice.Smith` and `alice_smith` are ONE
-    // store — never fired on the two calls that DESTROY data. Erasing the wrong
-    // tenant's memories is exactly the outcome that warning exists to prevent.
+    // Takes the store id directly instead of through uid(), so it warns here.
     warnIfStoreIdCollapses(userId);
     return this.post("/api/v1/memory/forget", { user_id: userId });
   }
