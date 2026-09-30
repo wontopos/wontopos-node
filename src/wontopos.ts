@@ -15,10 +15,11 @@
  * so with no `userId` anywhere the zero-setup path just works.
  *
  * The API key picks *which memory* (your account); `model` picks *which engine*
- * reads it. Models on the shared pool read the same memory, so you can store with
- * one and recall with another; `listModels()` reports each model's `memory` as
- * `"shared"` or `"isolated"`, and an isolated one starts empty. Set a default in
- * the constructor, or override a single call with
+ * reads it. `listModels()` reports each model's `memory` as `"shared"` or
+ * `"isolated"`, and an isolated one starts empty. Every model on the shared pool
+ * lists, fetches and deletes the same memories, but a search may not find memories
+ * stored through a different model; store and search with the same one. Set a
+ * default in the constructor, or override a single call with
  * `mem.withModel("tablet-1").recall(...)`.
  *
  * Recall quality does not depend on which language a memory was written in: a
@@ -26,10 +27,11 @@
  * and searching call no LLM.
  *
  * Reliability: every call retries transient failures with exponential backoff +
- * jitter, honoring `Retry-After` — 429 always; 408/502/503/504 and connection errors
- * only when a retry can never double-process a write (idempotent calls, or a failure
- * at connect time). Tune with `maxRetries` (0 disables) and `timeoutMs`, or per
- * call site via the `withTimeout()` / `withRetries()` clones.
+ * jitter, honoring `Retry-After` up to 30s — 429 and a 409 that says another write
+ * to the store was in flight, always; 408/502/503/504 and connection errors only when
+ * a retry can never double-process a write (idempotent calls, or a failure at connect
+ * time). Tune with `maxRetries` (0 disables) and `timeoutMs`, or per call site via
+ * the `withTimeout()` / `withRetries()` clones.
  *
  * Debugging: set `WONTOPOS_LOG=debug` to log method/path/status/timing/retries
  * to stderr — never memory content, request bodies, or the API key.
@@ -41,7 +43,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.40";
+const VERSION = "2.2.41";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -60,18 +62,18 @@ function logDebug(msg: string): void {
   }
 }
 const DEFAULT_BASE_URL = "https://api.wontopos.com";
-/** The engine every call uses unless the caller names another.
- *
- *  Tablet 2 costs the same per token as Tablet 1 and is the one that
- *  serves images, re-ask passes (`verify`), and `self_memories`, so a caller who
- *  names nothing gets the engine that can answer the most. Models on the shared
- *  pool read the same memory, so switching between them is a header, not a
- *  migration. Pin an older one explicitly with
- *  `new Client({ apiKey, model: "tablet-1" })` or `withModel("tablet-1")`. */
+/** The engine every call uses unless the caller names another. Pin a different one
+ *  with `new Client({ apiKey, model: "tablet-1" })` or `withModel("tablet-1")`;
+ *  `listModels()` reports what each model can do in `capabilities`. */
 const DEFAULT_MODEL = "tablet-2";
 /** 429 is refused before the request is processed → always safe to retry, nothing
  *  was stored. */
 const RETRY_ALWAYS = new Set([429]);
+/** The longest wait before a retry. A `Retry-After` asking for more is not waited
+ *  out: the call fails at once with the server's error. */
+const MAX_RETRY_WAIT_MS = 30_000;
+/** setTimeout's ceiling; a longer delay fires after 1ms. */
+const MAX_TIMER_MS = 2_147_483_647;
 /** 502/503 are ambiguous for a write — they can arrive after the write already
  *  landed, and a retried POST would store it twice — so retry them only for
  *  idempotent methods. 504 is the same shape. 408 sits here rather than in
@@ -87,6 +89,8 @@ const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 const MODEL_RE = /^[A-Za-z0-9._-]+$/;
 /** Cap a server-controlled error message so a hostile body can't blow up a log. */
 const MAX_ERR_MSG = 4096;
+/** `WosError.details` JSON stays at most this long (its biggest fields are dropped), for the same reason. */
+const MAX_ERR_DETAILS = 8192;
 /** What the API accepts as an `Idempotency-Key`. Checked client-side so a bad key
  *  fails before the request instead of coming back as a 400 mid-retry. */
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:\-]{1,128}$/;
@@ -107,11 +111,8 @@ function normalizeStoreId(id: string): string {
  *  user it sees one id per user, so past the cap the oldest entry is evicted and an id
  *  that first shows up late still gets its warning. */
 const WARNED_STORE_IDS_MAX = 1024;
-/** A store id is usable when it was omitted, or is a non-blank string.
- *
- *  The check is `typeof !== "string"`, not `!String(id).trim()`. The old form only
- *  caught a blank STRING, and the value a failed lookup actually produces in JavaScript
- *  is `null` — `String(null)` is the truthy "null", so it sailed through. */
+/** A store id is usable when it was omitted, or is a non-blank string. `null`, `0`
+ *  and other non-strings are refused: `String(null)` is the truthy "null". */
 function assertUsableStoreId(userId: unknown): asserts userId is string | undefined {
   if (userId !== undefined && (typeof userId !== "string" || !userId.trim())) {
     throw new Error(
@@ -165,23 +166,22 @@ function checkMetadataKeys(metadata: unknown): void {
     }
   }
 }
-/** Test hook — the warn-once set is process-global by design. */
+/** @deprecated Test hook. The warn-once set is process-global by design. */
 export function _resetStoreIdWarnings(): void {
   warnedStoreIds.clear();
 }
 /** Statuses that legitimately carry NO body (RFC 9110). Everything else must
  *  answer with a JSON object — see the empty-body check in `request`. */
 const NO_BODY_STATUS = new Set([204, 205, 304]);
-/** Paging backstop: bound the walk so a fresh-cursor-forever server can't loop us. */
-// A page walk has to stop somewhere, and 1,000,000 pages was not a stop: at 100 per
-// page that is 100 million memories, so a server minting a fresh cursor every time
-// would spend hours and a million billed requests before it fired. 20,000 pages is two
-// million memories — past any real store, reached in minutes.
-//
-// ★And it has to be LOUD. Falling out of the loop yielded a truncated list that looks
-// exactly like a complete one; the caller writes it to a file believing it is the
-// whole store. Hitting this now throws.
+// Paging backstop: 20,000 pages is two million memories at 100 a page, past any real
+// store. A walk that reaches it throws, because a truncated list looks exactly like a
+// complete one to whoever writes it to a file.
 const MAX_PAGES = 20_000;
+
+/** The error a page walk throws when it cannot reach the end of the store. */
+function truncatedWalk(why: string): Error {
+  return new Error(`${why} This is a truncated answer, not the whole store.`);
+}
 
 export const SEARCH_LIMIT_MIN = 5;
 export const SEARCH_LIMIT_MAX = 20;
@@ -191,26 +191,13 @@ export const CONTEXT_LIMIT_MIN = 0;
 export const CONTEXT_LIMIT_MAX = 20;
 
 /** The 5-to-20 count shared by `search` and `recall`, refused out of range rather
- * than quietly adjusted.
- *
- * The service has refused anything else from the start, because asking for 20 and
- * silently getting 10 reads as "that is all there is". Search had no contract at
- * all: the three clients sent whatever they were given, the MCP server allowed 1 to
- * 60, and the service quietly capped at 50 with no floor. Four surfaces, four
- * answers, and the caller could not tell which one they got.
- *
- * ★ `recall` said it enforced this and did not. Its doc comment promised "out of
- * range is refused, not clamped" while the value went straight to the wire in all
- * three SDKs — so `limit: 500` travelled to the engine and died there. A comment
- * that describes a guard is not a guard, and this is the shape of defect a reviewer
- * reading one diff can never see: the promise and the missing code were written
- * months apart.
+ * than quietly adjusted: asking for 20 and silently getting 10 reads as "that is
+ * all there is".
  *
  * Thrown as a plain `Error`, like every other argument check in this file. It is
- * NOT a `WosError` — nothing was sent, and `WosError` with status 0 means
- * `APIConnectionError`, "the request never got a response". Reusing that status for
- * a typo told a caller with `if (e.status === 0) retry()` to retry a bad argument
- * forever. */
+ * NOT a `WosError` — nothing was sent, and status 0 is reserved for
+ * `APIConnectionError`, "the request never got a response", which a caller may
+ * retry. */
 function checkCount(limit: number, name: string): void {
   if (!Number.isInteger(limit) || limit < SEARCH_LIMIT_MIN || limit > SEARCH_LIMIT_MAX) {
     throw new Error(
@@ -221,16 +208,44 @@ function checkCount(limit: number, name: string): void {
   }
 }
 
-/** `recall`'s `context_limit`, 0 to 20. Same reason as the count above: the doc
- *  comment on `recall` promises out-of-range is refused, and a promise the client
- *  does not keep is worse than no promise — the caller reads the doc, sends 50, and
- *  the failure arrives from the service with no hint that the SDK knew all along. */
+/** `recall`'s `context_limit`, 0 to 20, refused out of range like the count above. */
 function checkContextLimit(n: number): void {
   if (!Number.isInteger(n) || n < CONTEXT_LIMIT_MIN || n > CONTEXT_LIMIT_MAX) {
     throw new Error(
       `context_limit must be an integer between ${CONTEXT_LIMIT_MIN} and ${CONTEXT_LIMIT_MAX}, got ${n}.`
     );
   }
+}
+
+/** Page sizes the service takes for images, `bySpeaker` and `revisions`. */
+const PAGE_LIMIT_MIN = 5;
+const PAGE_LIMIT_MAX = 20;
+/** The most memories one `listMemories` page returns. */
+const LIST_LIMIT_MAX = 500;
+/** How many image memories a search may carry. */
+const MAX_IMAGES_MAX = 5;
+
+/** An integer in `min..=max`, or a plain `Error` naming the range. Booleans, strings
+ *  and non-finite numbers are refused rather than sent. */
+function checkRange(n: unknown, name: string, min: number, max: number): void {
+  if (typeof n !== "number" || !Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}, got ${String(n)}.`);
+  }
+}
+
+/** An optional count: `undefined` when not given (`undefined` or `null`), otherwise
+ *  checked by `checkRange`. */
+function optRange(n: unknown, name: string, min: number, max: number): number | undefined {
+  if (n === undefined || n === null) return undefined;
+  checkRange(n, name, min, max);
+  return n as number;
+}
+
+/** A timeout or deadline in ms. Anything that is not a positive number means "not set";
+ *  a value past the timer ceiling is clamped. */
+function checkMs(v: unknown): number | undefined {
+  if (typeof v !== "number" || Number.isNaN(v) || v <= 0) return undefined;
+  return Math.min(v, MAX_TIMER_MS);
 }
 
 /**
@@ -254,7 +269,7 @@ function normalizeImage(image: ImageInput): Record<string, unknown> {
   }
   // Trim before looking for the prefix. Checked against the raw string, one leading
   // space (` data:image/png;base64,…`) hides the prefix, and the literal
-  // `data:image/png;base64,` travels as part of the base64. The engine answers 400
+  // `data:image/png;base64,` travels as part of the base64. The service answers 400
   // "image could not be read" and the caller has no way to tell why.
   const raw = image.data.trim();
   const comma = raw.startsWith("data:") ? raw.indexOf(",") : -1;
@@ -268,10 +283,12 @@ function normalizeImage(image: ImageInput): Record<string, unknown> {
   if (image.taken_at !== undefined) out.taken_at = image.taken_at;
   return out;
 }
-/** Error codes that only occur while ESTABLISHING a connection — the request
- * never reached the server, so a retry can't double-process a write. Mid-stream
- * codes (ECONNRESET, EPIPE, UND_ERR_SOCKET, ETIMEDOUT) are ambiguous: the server
- * may already have processed the request, so they're excluded. */
+/** Error codes that can come from ESTABLISHING a connection. They count as a
+ * connect failure (the request never reached the server, so a retry can't
+ * double-process a write) only when the failing syscall is the connect or the DNS
+ * lookup: the same codes on a `read` or `write` mean the request may already have
+ * been sent. Mid-stream codes (ECONNRESET, EPIPE, UND_ERR_SOCKET, ETIMEDOUT) never
+ * count. */
 const CONNECT_FAIL_CODES = new Set([
   "ECONNREFUSED",
   "ENOTFOUND",
@@ -282,19 +299,241 @@ const CONNECT_FAIL_CODES = new Set([
   "EADDRNOTAVAIL",
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
+const CONNECT_SYSCALLS = new Set(["connect", "getaddrinfo"]);
+/** Codes that only a DNS lookup or a connect timeout produce, whatever the syscall. */
+const CONNECT_ONLY_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 
 /** Walk an error's `cause` chain (and AggregateError members — happy-eyeballs
- * connects) looking for a connect-level failure code. */
+ * connects) looking for a connect-level failure. */
 function isConnectFailure(e: unknown): boolean {
   const stack: unknown[] = [e];
   for (let steps = 0; stack.length && steps < 24; steps++) {
     const cur = stack.pop() as any;
     if (!cur || typeof cur !== "object") continue;
-    if (typeof cur.code === "string" && CONNECT_FAIL_CODES.has(cur.code)) return true;
+    if (
+      typeof cur.code === "string" &&
+      (CONNECT_ONLY_CODES.has(cur.code) || (CONNECT_FAIL_CODES.has(cur.code) && CONNECT_SYSCALLS.has(cur.syscall)))
+    ) {
+      return true;
+    }
     if (cur.cause) stack.push(cur.cause);
     if (Array.isArray(cur.errors)) stack.push(...cur.errors.slice(0, 8));
   }
   return false;
+}
+
+/** The first `code` in an error's cause chain (`ECONNREFUSED`, `CERT_HAS_EXPIRED`, …). */
+function causeCode(e: unknown): string | undefined {
+  const queue: unknown[] = [e];
+  for (let steps = 0; queue.length && steps < 24; steps++) {
+    const cur = queue.shift() as any;
+    if (!cur || typeof cur !== "object") continue;
+    if (typeof cur.code === "string" && /^[A-Z0-9_]{1,64}$/.test(cur.code)) return cur.code;
+    if (cur.cause) queue.push(cur.cause);
+    if (Array.isArray(cur.errors)) queue.push(...cur.errors.slice(0, 8));
+  }
+  return undefined;
+}
+
+/** Server-provided text as it may appear in an error message: C0 control characters
+ *  and DEL removed, so it cannot fake log lines or drive a terminal, and capped. */
+function cleanServerText(s: string, max = MAX_ERR_MSG): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = s.replace(/[\u0000-\u001f\u007f]/g, "");
+  return clean.length > max ? clean.slice(0, max) + "…(truncated)" : clean;
+}
+
+/** The rest of a server's error object as `WosError.details`, with control characters
+ *  removed from every key and string and each string capped. When its JSON is still
+ *  over `MAX_ERR_DETAILS`, the biggest fields are dropped until it fits, so a short
+ *  field such as `conflicts_with` survives a long one beside it. */
+function cleanDetails(d: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!d) return undefined;
+  const clean = (v: unknown): unknown => {
+    if (typeof v === "string") return cleanServerText(v);
+    if (Array.isArray(v)) return v.map(clean);
+    if (v && typeof v === "object") {
+      // fromEntries defines own properties, so a "__proto__" key stays a plain key.
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [cleanServerText(k), clean(x)]));
+    }
+    return v;
+  };
+  let entries: [string, unknown, number][];
+  try {
+    // Stringify first: it throws on nesting too deep for `clean` to walk.
+    JSON.stringify(d);
+    entries = Object.entries(clean(d) as Record<string, unknown>).map(([k, v]) => [
+      k,
+      v,
+      JSON.stringify(k).length + JSON.stringify(v).length + 2,
+    ]);
+  } catch {
+    return undefined;
+  }
+  const keep = new Set<string>();
+  let size = 2;
+  for (const [k, , n] of [...entries].sort((a, b) => a[2] - b[2])) {
+    if (size + n > MAX_ERR_DETAILS) break;
+    keep.add(k);
+    size += n;
+  }
+  if (!keep.size) return undefined;
+  return Object.fromEntries(entries.filter(([k]) => keep.has(k)).map(([k, v]) => [k, v]));
+}
+
+/** What an error body says, from the envelope
+ *  `{"type":"error","error":{"type","message","request_id",…}}`, a bare
+ *  `{"error":"reason"}`, or `{"message":"…"}`; otherwise the raw text. */
+function parseErrorText(text: string): {
+  message: string;
+  requestId?: string;
+  type?: string;
+  details?: Record<string, unknown>;
+} {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return { message: text };
+  const err = (data as any).error;
+  if (err && typeof err === "object" && !Array.isArray(err)) {
+    const { message, type, request_id, ...rest } = err as Record<string, unknown>;
+    return {
+      message: typeof message === "string" ? message : typeof type === "string" ? type : text,
+      requestId: typeof request_id === "string" ? request_id : undefined,
+      type: typeof type === "string" ? type : undefined,
+      details: Object.keys(rest).length ? rest : undefined,
+    };
+  }
+  if (typeof err === "string") return { message: err };
+  if (typeof (data as any).message === "string") return { message: (data as any).message };
+  return { message: text };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const IMF_FIXDATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\d{2}) ([A-Z][a-z]{2}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$/;
+const RFC850_DATE =
+  /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\d{2})-([A-Z][a-z]{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT$/;
+const ASCTIME_DATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) ([ \d]\d) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/;
+
+/** Milliseconds a `Retry-After` value asks for, or `undefined` when it is neither
+ *  delta-seconds nor an HTTP-date (RFC 9110). A date in the past asks for 0. */
+function retryAfterMs(v: string | null, now = Date.now()): number | undefined {
+  if (v == null) return undefined;
+  const s = v.trim();
+  if (/^\d+$/.test(s)) return Math.min(Number(s), Number.MAX_SAFE_INTEGER / 1000) * 1000;
+  let parts: [string, string, number, string, string, string] | undefined;
+  let m: RegExpExecArray | null;
+  if ((m = IMF_FIXDATE.exec(s))) parts = [m[1], m[2], Number(m[3]), m[4], m[5], m[6]];
+  else if ((m = RFC850_DATE.exec(s))) {
+    // A two-digit year more than 50 years ahead is the most recent past one.
+    let year = 2000 + Number(m[3]);
+    if (year > new Date(now).getUTCFullYear() + 50) year -= 100;
+    parts = [m[1], m[2], year, m[4], m[5], m[6]];
+  } else if ((m = ASCTIME_DATE.exec(s))) parts = [m[2].trim(), m[1], Number(m[6]), m[3], m[4], m[5]];
+  if (!parts) return undefined;
+  const [day, mon, year, hh, mm, ss] = parts;
+  const month = MONTHS.indexOf(mon);
+  const d = Number(day), h = Number(hh), mi = Number(mm), se = Number(ss);
+  if (month < 0 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 60) return undefined;
+  return Math.max(0, Date.UTC(year, month, d, h, mi, se) - now);
+}
+
+/** How long the error body of an answer that will be retried gets to arrive. The retry
+ *  does not need it; it only fills in the error reported if the retry cannot be made. */
+const BRIEF_BODY_MS = 1_000;
+
+/** A body that did not arrive within the time it was given. */
+class SlowBody extends Error {}
+
+/** The global fetch bound to `globalThis`. Clones pass it back in as `fetch`, so each
+ *  one is remembered as not the caller's own. */
+const DEFAULT_TRANSPORTS = new WeakSet<object>();
+function defaultTransport(): unknown {
+  const g = (globalThis as any).fetch;
+  if (typeof g !== "function") return undefined;
+  const bound = g.bind(globalThis);
+  DEFAULT_TRANSPORTS.add(bound);
+  return bound;
+}
+
+/** Release a response body that will not be read; a failed cancel has nothing to report. */
+function discard(res: { body?: { cancel(): Promise<void> } | null }): void {
+  res.body?.cancel().catch(() => {});
+}
+
+/** `new URL(s, base)`, or `undefined` when it does not parse. */
+function tryUrl(s: string, base?: string): URL | undefined {
+  try {
+    return base === undefined ? new URL(s) : new URL(s, base);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The page a relative URL resolves against (`location.href`), where the runtime has one. */
+function pageHref(): string | undefined {
+  try {
+    const href = (globalThis as any).location?.href;
+    return typeof href === "string" ? href : undefined;
+  } catch {
+    return undefined; // a runtime whose `location` throws when it has none
+  }
+}
+
+/** `baseUrl` read the way fetch will read it: an absolute http(s) URL, or, where the
+ *  runtime has a page (`location`), a URL relative to that page. `undefined` when
+ *  fetch cannot send to it. */
+function parseBase(base: string): URL | undefined {
+  let url = tryUrl(base);
+  if (!url) {
+    const page = pageHref();
+    if (page !== undefined) url = tryUrl(base, page);
+  }
+  return url && (url.protocol === "http:" || url.protocol === "https:") ? url : undefined;
+}
+
+/** `baseUrl` read as relative to a page, when it has no scheme of its own. */
+function asPageRelative(base: string): URL | undefined {
+  return tryUrl(base) ? undefined : tryUrl(base, "http://page.invalid/");
+}
+
+/** Whitespace at either end of a string. A control character there is refused. */
+const BASE_URL_ENDS = /^\s+|\s+$/g;
+
+/** The error for a `baseUrl` fetch cannot send to. */
+function notAUrl(base: string): string {
+  return `baseUrl is not a URL: ${JSON.stringify(maskBase(base))} (expected e.g. ${DEFAULT_BASE_URL})`;
+}
+
+/** A base URL as an error message may show it: everything from after the scheme and
+ *  its slashes up to the last `@` (userinfo, which can hold a password) becomes `***@`. */
+function maskBase(raw: string): string {
+  const at = raw.lastIndexOf("@");
+  if (at === -1) return raw;
+  const from = /^(?:[a-z][a-z0-9+.-]*:)?[\\/]*/i.exec(raw)![0].length;
+  return `${raw.slice(0, from)}***@${raw.slice(at + 1)}`;
+}
+
+/** Text that may quote a URL, with every userinfo in it masked: the run of characters
+ *  before an `@` becomes `***` when it follows a slash or holds a `:` (after a leading
+ *  scheme, which stays). One pass, so a long message costs no more than its length. */
+function maskUserinfo(text: string): string {
+  let out = "";
+  let done = 0;
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    let start = at;
+    while (start > 0 && !/[\s\\/@]/.test(text[start - 1])) start--;
+    const run = text.slice(start, at);
+    const afterSlash = start > 0 && (text[start - 1] === "/" || text[start - 1] === "\\");
+    if (!afterSlash && !run.includes(":")) continue;
+    const scheme = afterSlash ? "" : (/^[a-z][a-z0-9+.-]*:/i.exec(run)?.[0] ?? "");
+    out += `${text.slice(done, start + scheme.length)}***`;
+    done = at;
+  }
+  return out + text.slice(done);
 }
 
 /** `wos-abc...wxyz` — enough to tell keys apart, never enough to use. */
@@ -361,23 +600,49 @@ function mergeResults(r: { memories?: unknown; self_memories?: unknown; images?:
 }
 
 /** Attach a delivery-form override ("memoir"/"archive") + tz to a request body, the
- * way search passes them; on Scroll 1.2+ this renders each returned memory's time in
- * that form. The server validates the form (400 on an unknown one). */
+ * way search passes them; on a model that lists `forms` in its capabilities this
+ * renders each returned memory's time in that form. The server validates the form
+ * (400 on an unknown one). */
 function withForm(body: Record<string, unknown>, form?: string, tz?: number): Record<string, unknown> {
   if (form !== undefined) body.form = form;
   if (tz !== undefined) body.tz = tz;
   return body;
 }
 
+/** What a `WosError` carries beyond its status, message and request id. */
+export interface WosErrorInit {
+  /** `error.type` from the service's answer. */
+  type?: string;
+  /** The rest of the service's error object. */
+  details?: Record<string, unknown>;
+  /** `Retry-After`, in seconds (read by `RateLimitError`). */
+  retryAfter?: number;
+  /** The underlying error, kept as the standard `cause`. */
+  cause?: unknown;
+}
+
 export class WosError extends Error {
   readonly status: number;
   /** The server's id for the request when it sent one — include it when contacting support. */
   readonly requestId?: string;
-  constructor(status: number, message: string, requestId?: string) {
-    super(`[${status}] ${message}${requestId ? ` (request_id: ${requestId})` : ""}`);
+  /** `error.type` from the service's answer (e.g. `"conflict_error"`), when it sent one.
+   *  Control characters are removed and it is capped, like the message. */
+  readonly type?: string;
+  /** Every other field of the service's error object — all but `message`, `type` and
+   *  `request_id` — when there is any. Control characters are removed from its keys
+   *  and strings, each string is capped, and when its JSON is over 8192 characters the
+   *  biggest fields are left out. A 501 carries `model` and `endpoint` here. */
+  readonly details?: Record<string, unknown>;
+  constructor(status: number, message: string, requestId?: string, init?: WosErrorInit) {
+    super(
+      `[${status}] ${message}${requestId ? ` (request_id: ${requestId})` : ""}`,
+      init?.cause === undefined ? undefined : { cause: init.cause },
+    );
     this.name = new.target.name; // the concrete subclass name (RateLimitError, …)
     this.status = status;
     this.requestId = requestId;
+    this.type = init?.type;
+    this.details = init?.details;
   }
 }
 
@@ -385,7 +650,8 @@ export class WosError extends Error {
 // RateLimitError) … }`. Each is a WosError, so a broad `instanceof WosError` still works.
 /** The request never got a response (DNS/TLS/timeout/connection). `status` is 0. */
 export class APIConnectionError extends WosError {}
-/** 400 — the request was malformed (bad arguments). */
+/** 400 — the request was malformed (bad arguments). 413 (body too large) and 422
+ *  (an idempotency key reused with a different body) arrive as this class too. */
 export class BadRequestError extends WosError {}
 /** 401 — the API key is missing, wrong, or revoked. */
 export class AuthenticationError extends WosError {}
@@ -395,43 +661,61 @@ export class PaymentRequiredError extends WosError {}
 export class PermissionDeniedError extends WosError {}
 /** 404 — the store or resource doesn't exist. */
 export class NotFoundError extends WosError {}
-/** 409 — another write to this store was in flight (nothing was stored; retry), or the
- *  store id collides with an existing store's (permanent). */
-export class ConflictError extends WosError {}
-/** 429 — too many requests. Back off and retry (the client already retries these). */
-export class RateLimitError extends WosError {}
+/** 409: another write to this store was in flight (retried automatically; nothing was
+ *  stored), or the store id collides with an existing one (not retried). */
+export class ConflictError extends WosError {
+  /** The existing store id this one collides with. Set only on a collision, which
+   *  retrying cannot fix. */
+  readonly conflictsWith?: string;
+  constructor(status: number, message: string, requestId?: string, init?: WosErrorInit) {
+    super(status, message, requestId, init);
+    const c = init?.details?.conflicts_with;
+    this.conflictsWith = typeof c === "string" ? c : undefined;
+  }
+}
+/** 429 — too many requests. Back off and retry (the client already retries these,
+ *  unless `Retry-After` asks for more than 30 seconds). */
+export class RateLimitError extends WosError {
+  /** Seconds the service asked to wait (`Retry-After`), when it said. */
+  readonly retryAfter?: number;
+  constructor(status: number, message: string, requestId?: string, init?: WosErrorInit) {
+    super(status, message, requestId, init);
+    const r = init?.retryAfter;
+    this.retryAfter = typeof r === "number" && Number.isFinite(r) && r >= 0 ? r : undefined;
+  }
+}
 /**
  * 5xx — the service failed.
  *
  * `502` / `503` / `504` are transient: the client already retries them for calls
  * where a retry cannot double-process a write, and retrying yourself is reasonable.
  *
- * `501` is NOT transient. It means the engine behind the model you selected does
- * not implement that endpoint at all (the error carries `model` and `endpoint`).
- * Retrying can never succeed — pick a model that supports it (`listModels`) or
- * drop the call. Treating the whole 5xx range as retryable sends a caller into a
- * loop that cannot end.
+ * `501` is NOT transient. It means the model you selected does not implement that
+ * endpoint at all (`details` carries `model` and `endpoint`). Retrying can never
+ * succeed — pick a model that supports it (`listModels`) or drop the call.
  */
 export class ServerError extends WosError {}
 
-const STATUS_ERRORS: Record<number, new (s: number, m: string, r?: string) => WosError> = {
+const STATUS_ERRORS: Record<number, new (s: number, m: string, r?: string, i?: WosErrorInit) => WosError> = {
   400: BadRequestError,
   401: AuthenticationError,
   402: PaymentRequiredError,
   403: PermissionDeniedError,
   404: NotFoundError,
   409: ConflictError,
+  413: BadRequestError,
+  422: BadRequestError,
   429: RateLimitError,
 };
 
 /** Build the most specific WosError subclass for an HTTP status. */
 // Internal factory — the typed error CLASSES are the public surface.
-function errorFor(status: number, message: string, requestId?: string): WosError {
+function errorFor(status: number, message: string, requestId?: string, init?: WosErrorInit): WosError {
   const Cls =
     status === 0
       ? APIConnectionError
       : STATUS_ERRORS[status] ?? (status >= 500 && status < 600 ? ServerError : WosError);
-  return new Cls(status, message, requestId);
+  return new Cls(status, message, requestId, init);
 }
 
 // ----- response shapes (per https://wontopos.com/llms.txt) -----
@@ -482,8 +766,7 @@ export interface StoreResult {
    * A genuinely new fact that only varies a detail of one already stored ("no meetings
    * before 10am" next to "no meetings on Fridays") can land here too, so a duplicate is
    * not always a harmless no-op: read this id, and either store one sentence that states
-   * both or `update()` the existing memory with the combined statement. Without it a
-   * dropped write gave the caller nothing to act on.
+   * both or `update()` the existing memory with the combined statement.
    */
   duplicate_of?: string;
   /** Present when the store was a duplicate and something (e.g. a speaker tag) was dropped. */
@@ -501,12 +784,13 @@ export interface StatusResult {
   [key: string]: unknown;
 }
 
-// ----- images (Tablet 2 and newer) -----
+// ----- images (models that list `images` in their capabilities) -----
 
 /**
  * An image attached to a memory, passed to `add`/`store` via `opts.image`.
  *
- * Both edges must be 700px or more; a smaller image is refused (400).
+ * Both edges must be 700px or more; a smaller image is refused (400). A request
+ * body is capped at 10MB.
  *
  * What the service keeps is NOT your original. An image whose long edge is over
  * 1568px is downscaled to 1568 before anything else happens, and that smaller
@@ -522,18 +806,23 @@ export interface StatusResult {
  * already fits within 1568px, and a re-encode that would make the file BIGGER is
  * thrown away and your bytes kept as they were.
  *
- * Keep your own copy if you need the full-resolution file. Either archive it
- * yourself, or put its URL in `reference` — we store that string and never open it.
+ * Keep your own copy if you need the full-resolution file.
  *
  * You are billed for the picture we keep, so downscaling never costs you more.
  */
 export interface ImageInput {
   /** base64 of the image. A `data:image/...;base64,` prefix is accepted and stripped. */
   data: string;
-  /** Where YOUR copy of the original lives. Stored as-is; the service never fetches it. */
+  /**
+   * Where YOUR copy of the image lives. Stored as-is; the service never fetches it.
+   *
+   * When you send one, the service keeps no image bytes: `getImage` answers 404 for
+   * this memory, and you fetch the picture from your own reference.
+   */
   reference?: string;
   /**
-   * When the image was TAKEN (RFC3339), if you know it — usually from EXIF.
+   * When the image was TAKEN, if you know it — usually from EXIF. RFC3339 or a plain
+   * date (`YYYY-MM-DD`); anything else is refused (400) naming the field.
    *
    * Worth passing: an image knows a moment that its caption does not. This fills
    * `metadata.event_date` when that is empty, so "the day we moved" sorts by when it
@@ -562,12 +851,8 @@ export interface ImageDeleteResult {
   status?: string;
   memory_id?: string;
   /**
-   * Whether the MEMORY survives losing its image.
-   *
-   * A captioned image keeps its text and only loses the image. An image stored with no
-   * caption IS the memory, so deleting the image deletes the memory — and the service
-   * says so here rather than silently taking more than you asked for. Call with
-   * `preview: true` first if that distinction matters to you.
+   * Whether the MEMORY survives losing its image. `false` means the delete removed
+   * the whole memory; call with `preview: true` first to find out before it happens.
    */
   memory_kept?: boolean;
   /** Plain-language note about the above, when there is something to say. */
@@ -595,7 +880,7 @@ export interface RevisionsResult {
   revised?: number;
   /** Memories nothing has touched since they were written. Always `total - revised`. */
   unrevised?: number;
-  /** Every memory in the store. Internal records nobody stored directly are not counted. */
+  /** The memories you stored. */
   total?: number;
   /** What `revised` counts, spelled out by the service. */
   counts?: string;
@@ -736,7 +1021,9 @@ export interface StatsResult {
 export interface MemoryPage {
   memories: Memory[];
   count: number;
-  /** Pass back as `cursor` for the next page; `null` on the last page. */
+  /** Pass back as `cursor` for the next page; `null` means there is none. It can be
+   *  non-null on the last page, and the next call then returns an empty page. Pass
+   *  back only a cursor the service returned. */
   next_cursor: string | null;
   [key: string]: unknown;
 }
@@ -749,12 +1036,34 @@ export interface SelfSearchResult {
   self_memories: Memory[];
 }
 
+/** What a model can do, as `listModels()` reports it. A model without a feature
+ *  refuses the call that needs it (usually 403) or answers without that part. */
+export interface ModelCapabilities {
+  /** Image memories: `opts.image` on `add`, `max_images`, `getImage`, `listImages`. */
+  images?: boolean;
+  /** `engram()`; `listEngrams()` names the ones this model runs. */
+  engrams?: boolean;
+  /** Delivery forms (`form` / `tz`) on search, recall and engram. */
+  forms?: boolean;
+  /** Re-ask passes (`verify`) on search. */
+  re_ask?: boolean;
+  /** The assistant's own words apart, in `self_memories`. */
+  self_memories?: boolean;
+  /** Speaker names, as the service reports them. */
+  speaker_names?: boolean;
+  [key: string]: boolean | undefined;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
   available: boolean;
-  /** "shared" — reads the common memory pool; "isolated" — its own dedicated store. */
+  /** "shared" — lists, fetches and deletes the common memory pool, though a search
+   *  may not find memories stored through a different model; "isolated" — its own
+   *  dedicated store. */
   memory: "shared" | "isolated";
+  /** What this model can do. Check it before relying on a feature. */
+  capabilities?: ModelCapabilities;
 }
 
 /** One entry of the engram / delivery-form catalogue (`listEngrams`). */
@@ -828,15 +1137,23 @@ export interface SpeakersList {
  * Retrieval behaves the same in every language, so these behave
  * identically in every language. Unlisted keys are dropped by the API rather than
  * rejected, so a typo silently widens the search — spell them exactly.
+ *
+ * Filters apply to `memories`. The assistant's own words (`self_memories`) are not
+ * filtered, and `search` merges them into its answer, so read `searchFull` when a
+ * filtered answer must hold only what matched.
+ *
+ * Every date takes RFC3339 or a plain date (`YYYY-MM-DD`). A plain end date
+ * (`time_to`, `event_to`) covers that whole day in UTC. A value that is not a date
+ * is refused (400) naming the field.
  */
 export interface SearchFilters {
   /** Only these categories (the `category` you see on `listMemories` results). */
   categories?: string[];
-  /** Ingestion-time window, as the API stores it. Plain strings, matched as given. */
+  /** When the memory was stored. */
   time_from?: string;
   time_to?: string;
   /** WHEN THE CONTENT HAPPENED (`metadata.event_date`), not when it was written —
-   *  this is the one you usually want. RFC3339, or a plain `YYYY-MM-DD`. */
+   *  this is the one you usually want. */
   event_from?: string;
   event_to?: string;
   /** Drop matches the engine scored below this importance (0–1). */
@@ -874,13 +1191,15 @@ const KNOWN_ENGRAM_KEYS = new Set(["form", "tz"]);
  */
 function checkSearchOpts(opts: object): void {
   checkOpts(opts, KNOWN_SEARCH_KEYS, "search");
+  // The value that is sent: the typed field, else one in `extra`.
+  const o = opts as SearchOptions;
+  optRange(o.max_images !== undefined ? o.max_images : o.extra?.max_images, "max_images", 0, MAX_IMAGES_MAX);
 }
 
-/** The same check for any option bag. `recall` had none, so `contextLimit: 0` — the
- *  camelCase typo of `context_limit`, and the one value that means "attach nothing" —
- *  vanished, the service applied its default of 10, and the caller paid for ten context
- *  memories they had explicitly asked not to have. TypeScript catches the object-literal
- *  form; JS callers and anything forwarded as `any` do not. */
+/** The same check for any option bag: `contextLimit: 0`, the camelCase typo of
+ *  `context_limit`, would otherwise vanish and the service would attach its default of
+ *  10. TypeScript catches the object-literal form; JS callers and anything forwarded
+ *  as `any` do not. */
 function checkOpts(opts: object, known: Set<string>, what: string): void {
   for (const k of Object.keys(opts)) {
     if (RESERVED_SEARCH_KEYS.has(k))
@@ -919,26 +1238,48 @@ function editWithin(a: string, b: string, max: number): boolean {
   return prev[b.length] <= max;
 }
 
-function warnOnUnknownFilters(filters: unknown): void {
-  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return;
-  for (const k of Object.keys(filters)) {
-    if (KNOWN_FILTER_KEYS.has(k) || warnedFilterKeys.has(k)) continue;
-    warnedFilterKeys.add(k);
-    // 2.2.27 capped the store-id warn set and left this sibling unbounded. An app that
-    // forwards user-supplied filter keys grows it forever, one entry per distinct typo.
-    while (warnedFilterKeys.size > WARNED_FILTER_KEYS_MAX) {
-      const oldest = warnedFilterKeys.values().next().value;
+/** Warn once per key of `obj` that is not in `known`. The record of keys already
+ *  warned about is capped, so an app that forwards user-supplied keys cannot grow it
+ *  without bound. */
+function warnOnceUnknownKeys(
+  obj: unknown,
+  known: Set<string>,
+  warned: Set<string>,
+  message: (key: string) => string,
+): void {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+  for (const k of Object.keys(obj)) {
+    if (known.has(k) || warned.has(k)) continue;
+    warned.add(k);
+    while (warned.size > WARNED_FILTER_KEYS_MAX) {
+      const oldest = warned.values().next().value;
       if (oldest === undefined) break;
-      warnedFilterKeys.delete(oldest);
+      warned.delete(oldest);
     }
-    console.warn(
-      `wontopos: unknown search filter ${JSON.stringify(k)} — the API drops keys it does not know, ` +
-        `so this filter has NO effect and the search is wider than you think. ` +
-        `Known keys: ${[...KNOWN_FILTER_KEYS].join(", ")}.`,
-    );
+    console.warn(message(k));
   }
 }
-/** Test hook — the warn-once set is process-global by design. */
+
+function warnOnUnknownFilters(filters: unknown): void {
+  warnOnceUnknownKeys(filters, KNOWN_FILTER_KEYS, warnedFilterKeys, (k) =>
+    `wontopos: unknown search filter ${JSON.stringify(k)} — the API drops keys it does not know, ` +
+      `so this filter has NO effect and the search is wider than you think. ` +
+      `Known keys: ${[...KNOWN_FILTER_KEYS].join(", ")}.`,
+  );
+}
+
+/** The metadata keys the service keeps on a memory. It drops every other key. */
+const KNOWN_METADATA_KEYS = new Set(["speaker", "event_date", "category", "conversation_id"]);
+const warnedMetadataKeys = new Set<string>();
+
+function warnOnUnknownMetadata(metadata: unknown): void {
+  warnOnceUnknownKeys(metadata, KNOWN_METADATA_KEYS, warnedMetadataKeys, (k) =>
+    `wontopos: metadata key ${JSON.stringify(k)} is not kept: the service keeps only ` +
+      `${[...KNOWN_METADATA_KEYS].join(", ")} and drops the rest, so this value is not stored.`,
+  );
+}
+
+/** @deprecated Test hook. The warn-once set is process-global by design. */
 export function _resetFilterWarnings(): void {
   warnedFilterKeys.clear();
 }
@@ -968,23 +1309,22 @@ export interface SearchOptions {
    * that need several distinct memories from far apart in the history; it does little
    * on a single-fact lookup.
    *
-   * Requires a re-ask-capable model. Older ones REFUSE the call (403) rather than
-   * quietly charging you for passes that never happened.
+   * Requires a model that lists `re_ask` in its `listModels()` capabilities; any
+   * other refuses the call (403) rather than charging for passes that never happened.
    */
   verify?: number;
   /**
    * How many image memories the answer may carry, 0–5. Omit it and the service uses
-   * 1; `0` asks for none. The MCP server defaults its own tool to 0 instead, so most
-   * searches through it carry no image rows.
-   * Out of range is refused, not clamped — silently cutting 5 to 1 would leave you
-   * believing you got five.
+   * 1; `0` asks for none. Out of range is refused before the request, not clamped —
+   * silently cutting 6 to 5 would leave you believing you got six.
    *
-   * Requires an image-capable model, and is refused (403) on one without it rather
-   * than answering with no images.
+   * Requires a model that lists `images` in its capabilities, and is refused (403)
+   * on one without it rather than answering with no images.
    */
   max_images?: number;
-  /** Delivery form, "memoir" or "archive" (Scroll 1.2+): how each memory's time is
-   *  rendered. The service refuses an unknown one (400). */
+  /** Delivery form, "memoir" or "archive": how each memory's time is rendered. Needs a
+   *  model that lists `forms` in its capabilities. The service refuses an unknown
+   *  form (400). */
   form?: string;
   /** Your UTC offset in hours, for rendering times in `form`. */
   tz?: number;
@@ -1000,70 +1340,124 @@ export interface SearchOptions {
  * Per-call options for a write.
  *
  * `idempotencyKey` makes repeating THIS EXACT write safe: the API replays the first
- * response instead of storing again, for 10 minutes, and answers 422 if the same key
- * arrives with a different body. Use it when a retry is your own (a job that died and
- * was re-run, a queue that redelivers). The SDK retries a write on exactly one
- * status: 429, which the service answers before it processes anything, so nothing
- * was stored. It never retries a write on 408 / 502 / 503 / 504 or a dropped body,
- * where the first attempt may already have landed — without a key the client cannot
- * know whether it did.
+ * response instead of storing again, for up to 10 minutes, and answers 422 if the
+ * same key arrives with a different body. Use it when a retry is your own (a job that
+ * died and was re-run, a queue that redelivers). The SDK retries a write on 429, and
+ * on a 409 that says another write to the store was in flight: the service answers
+ * both before it processes anything, so nothing was stored. It never retries a write
+ * on 408 / 502 / 503 / 504 or a dropped body, where the write may already have been
+ * applied — without a key the client cannot know whether it was.
+ *
+ * The key covers a retry sent after the first attempt finished. A retry that overlaps
+ * a first attempt still running can run twice, so wait for the first to fail before
+ * re-sending.
  *
  * The key must be UNIQUE PER LOGICAL WRITE — derive it from the thing being stored
  * (`` `import:${row.id}` ``), never a constant, or the second write replays the first
  * and is silently lost. Format: 1-128 chars of `[A-Za-z0-9._:-]`, checked locally.
  *
- * The window is in-memory on the API, so a deploy or restart clears it early. It is a
- * guard against a retry storm, not a durable ledger.
+ * The window is best-effort and can be shorter than 10 minutes; it is not a durable
+ * de-duplication record.
  */
 export interface WriteOptions {
   idempotencyKey?: string;
   /**
-   * An image to store alongside the text (Tablet 2 and newer).
+   * An image to store alongside the text. Needs a model that lists `images` in its
+   * `listModels()` capabilities; any other refuses the write rather than store the
+   * caption and quietly drop the image.
    *
-   * `content` may be empty when you pass one — then the image IS the memory and is
-   * searchable on its own. Older models have no image channel and will reject the
-   * write rather than store the caption and quietly drop the image.
+   * A caption is required: the service refuses empty `content` (400) even with an
+   * image attached.
    */
   image?: ImageInput;
 }
 
+/** The part of an `AbortSignal` the client uses, for a runtime that declares none. */
+export interface AbortSignalShape {
+  readonly aborted: boolean;
+  addEventListener(type: "abort", listener: () => void): void;
+  removeEventListener(type: "abort", listener: () => void): void;
+}
+
+/** The runtime's own `AbortSignal` type when it declares one (the DOM lib,
+ *  `@types/node`), otherwise {@link AbortSignalShape}. `AbortController#signal` fits. */
+export type AbortSignalLike = typeof globalThis extends { AbortSignal: { prototype: infer S } }
+  ? S
+  : AbortSignalShape;
+
+/** The `init` the client passes to `fetch`. */
+export interface FetchInitLike {
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+  signal: AbortSignalLike;
+  redirect: "manual";
+}
+
+/** The part of a `fetch` response the client reads. */
+export interface FetchResponseLike {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly type?: string;
+  readonly url?: string;
+  readonly redirected?: boolean;
+  readonly headers: { get(name: string): string | null };
+  readonly body?: {
+    getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(reason?: unknown): Promise<void> };
+    cancel(reason?: unknown): Promise<void>;
+  } | null;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+/** The runtime's own `fetch` type when it declares one (the DOM lib, `@types/node`),
+ *  otherwise a structural signature, so these types need neither. */
+export type FetchLike = typeof globalThis extends { fetch: infer F }
+  ? F
+  : (url: string, init: FetchInitLike) => Promise<FetchResponseLike>;
+
 export interface ClientOptions {
   apiKey: string;
-  /** API base URL (defaults to the hosted service). */
+  /** API base URL (defaults to the hosted service): an http or https URL or, where
+   *  the runtime has a page, a URL relative to it. Whitespace at either end is
+   *  trimmed; whitespace, a control character or a backslash left in it after that is
+   *  refused.
+   *  A relative URL where the runtime has no page (server-side rendering) fails the
+   *  first call that uses it, or goes to `fetch` as given when you pass one. */
   baseUrl?: string;
-  /** Per-request timeout in ms, applied to each retry attempt (default 30000). */
+  /** Per-request timeout in ms, applied to each retry attempt (default 30000). A
+   *  value that is not a positive number means the default; values above 2147483647
+   *  are clamped to it. */
   timeoutMs?: number;
   /** Default model for every call (sent as `X-WOS-Model`). See `listModels()`. */
   model?: string;
-  /** Default store for every call. Override per call by passing `userId`. Defaults
-   * to the account's built-in `default` store. */
+  /** Default store for every call. Override per call by passing `userId`. Leave it
+   * out to use the account's built-in `default` store; passing it as `undefined` is
+   * refused, because that is usually a lookup that found nothing. */
   userId?: string;
-  /** How many times to retry transient failures before throwing — 429 always;
-   * 408/502/503/504 and connection errors only when a retry can never
-   * double-process a write. 0 disables retries (default 2). */
+  /** How many times to retry transient failures before throwing — 429 and a 409
+   * that says another write was in flight, always; 408/502/503/504 and connection
+   * errors only when a retry can never double-process a write. 0 disables retries
+   * (default 2). */
   maxRetries?: number;
-  /** Alias of `maxRetries`. The Python SDK calls this option `retries`, and these
-   *  SDKs are published in lockstep as "the same surface" — so code ported between
-   *  them silently lost its retry setting instead of failing loudly (an unknown
-   *  key on an options object is not an error in TS at runtime). Both names work;
-   *  `maxRetries` wins if somehow both are given. */
+  /** Alias of `maxRetries`. `maxRetries` wins when both are given. */
   retries?: number;
   /** A total budget for one call, in ms, across every attempt.
    *
    *  `timeoutMs` bounds ONE attempt. At the defaults — 30s, two retries — a single
    *  call can hold a connection for 30s + backoff + 30s + backoff + 30s, over a
-   *  minute, and a server handler awaiting it has no way to say "I only have five
-   *  seconds". This is that way. Unset means no overall budget. */
+   *  minute. Unset means no overall budget. A retry whose wait does not fit in what
+   *  is left is not made: the call fails with the error of the last response. A
+   *  value that is not a positive number means no budget; values above 2147483647
+   *  are clamped to it. */
   deadlineMs?: number;
   /** The caller's `AbortSignal` — cancel work already in flight.
    *
    *  The SDK aborts on its own timeout; this is the seam for the caller's reason.
-   *  When someone closes the chat window, the recall that window asked for should
-   *  end, and the backoff sleep waiting to retry it should end too, instead of
-   *  running to completion and billing for an answer nobody will read.
+   *  When someone closes the chat window, the recall that window asked for ends, and
+   *  so does a backoff sleep waiting to retry it.
    *
    *  Per call, clone: `mem.withSignal(ctrl.signal).recall(...)`. */
-  signal?: AbortSignal;
+  signal?: AbortSignalLike;
   /** The `fetch` used for every request (default: the global `fetch`).
    *
    *  This is the seam for anything the runtime cannot express through options.
@@ -1080,8 +1474,12 @@ export interface ClientOptions {
    *
    *  It is also how you add instrumentation or drive the client in a test without
    *  a network. Retries, timeouts, redirect refusal and the size cap all still
-   *  apply — this replaces the transport, not the client's rules. */
-  fetch?: typeof fetch;
+   *  apply — this replaces the transport, not the client's rules. Pass
+   *  `init.redirect` through unchanged: a fetch that follows a redirect sends the
+   *  key to wherever it points, and an answer it reports as redirected
+   *  (`res.redirected`) is refused. A fetch that sends the request to another URL
+   *  on purpose, such as a proxy that rewrites it, is fine. */
+  fetch?: FetchLike;
 }
 
 const DEFAULT_USER = "default";
@@ -1095,10 +1493,17 @@ export class Client {
   private readonly model: string;
   private readonly maxRetries: number;
   private readonly deadlineMs?: number;
-  private readonly signal?: AbortSignal;
+  private readonly signal?: AbortSignalLike;
   /** Transport. Held as a field (not read off `globalThis` per call) so a caller
    * who passes one gets it for every request, including from cloned clients. */
-  private readonly fetchImpl: typeof fetch;
+  private readonly fetchImpl: (url: string, init: FetchInitLike) => Promise<Response>;
+  /** Whether `baseUrl` carries userinfo, which network errors must not show. */
+  private readonly userinfo: boolean;
+  /** Whether `baseUrl` did not resolve to a URL at construction: a relative one where
+   *  the runtime had no page. */
+  private readonly pageRelative: boolean;
+  /** Whether the caller supplied `fetch`. */
+  private readonly customFetch: boolean;
   /** The store every call uses unless one passes `userId`. */
   private readonly defaultUser: string;
   private _rateLimit: RateLimit | null = null;
@@ -1132,42 +1537,60 @@ export class Client {
       );
     }
     this.apiKey = key;
-    this.base = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-    // Coerce a non-finite or non-positive timeout back to the default — NaN
-    // (e.g. Number() of an unset env var) would otherwise make the abort timer
-    // fire immediately and every request "time out after NaNms".
-    const tm = opts.timeoutMs;
-    this.timeoutMs = typeof tm === "number" && Number.isFinite(tm) && tm > 0 ? tm : 30_000;
+    const rawBase = opts.baseUrl ?? DEFAULT_BASE_URL;
+    if (typeof rawBase !== "string") throw new Error("baseUrl must be a string");
+    // A value read from a file or an env var often ends in a newline.
+    const trimmed = rawBase.replace(BASE_URL_ENDS, "");
+    // Inside the URL, the parser drops tabs and newlines and reads `\` as `/`, so the
+    // host a request reaches is not the one the string shows. Userinfo may hold a
+    // password, so no message shows it.
+    // eslint-disable-next-line no-control-regex
+    if (/[\s\\\u0000-\u001f\u007f]/.test(trimmed)) {
+      throw new Error(
+        `baseUrl contains whitespace, a backslash or a control character: ${JSON.stringify(maskBase(trimmed))}`,
+      );
+    }
+    this.base = trimmed.replace(/\/+$/, "");
+    // A base fetch cannot send to fails every call before it leaves, as a status-0
+    // network error that retries and then reads like an outage. A relative base in a
+    // runtime with no page (server-side rendering of browser code) is checked when a
+    // call uses it instead, and a caller-supplied fetch receives it as given.
+    const url = parseBase(this.base);
+    const parsed = url ?? (pageHref() === undefined ? asPageRelative(this.base) : undefined);
+    if (!parsed) throw new Error(notAUrl(trimmed));
+    this.pageRelative = !url;
+    this.userinfo = Boolean(parsed.username || parsed.password);
+    this.timeoutMs = checkMs(opts.timeoutMs) ?? 30_000;
     this.model = opts.model ?? DEFAULT_MODEL;
     if (this.model && !MODEL_RE.test(this.model)) {
       throw new Error(`invalid model name: ${JSON.stringify(this.model)} (letters, digits, '.', '_', '-' only)`);
     }
-    // The same guard uid() applies per call. It used to live only there, so
-    // `new Client({ userId })` and `withUser(...)` — the documented per-tenant pattern —
-    // walked straight past it: `withUser("")`, `withUser(null)` and `withUser(0)` all
-    // became the shared `default` store with no warning, while `add(text, "")` threw.
-    // A destination that depends on WHICH door the id came through is the worst kind of
-    // silent redirect: one end-user's memories land in a store everyone can read.
+    // The same guard uid() applies per call, so the default store cannot become the
+    // shared one by accident either. Leaving `userId` out means the default store;
+    // passing it as `undefined` is a lookup that found nothing.
+    if (opts && "userId" in opts && opts.userId === undefined) {
+      throw new Error(
+        "new Client() needs a store id in userId, or no userId option at all. It was given " +
+          "undefined. That is usually a lookup that found nothing. Leave userId out to use the default store.",
+      );
+    }
     assertUsableStoreId(opts.userId);
     this.defaultUser = opts.userId ?? DEFAULT_USER;
-    // Coerce a non-finite maxRetries (NaN/Infinity) back to the default — otherwise
-    // NaN makes `attempts = NaN + 1` and the loop runs zero requests then throws
-    // "retries exhausted"; Infinity would retry forever.
+    // A non-finite maxRetries (NaN/Infinity) falls back to the default: NaN would run
+    // zero attempts and Infinity would retry forever.
     const mr = opts.maxRetries ?? opts.retries;
     this.maxRetries = typeof mr === "number" && Number.isFinite(mr) ? Math.max(0, Math.floor(mr)) : 2;
-    const dl = opts.deadlineMs;
-    // A zero or negative budget would fail every call before it starts — treat it as
-    // "no budget", the same way a non-positive timeout falls back to the default.
-    this.deadlineMs = typeof dl === "number" && Number.isFinite(dl) && dl > 0 ? dl : undefined;
+    this.deadlineMs = checkMs(opts.deadlineMs);
     this.signal = opts.signal;
     // Bind the global so `fetch` is not called as a method of `globalThis`, which
     // throws "Illegal invocation" on some runtimes. A caller-supplied fetch is
     // taken as given — it is already whatever they meant to hand us.
-    const f = opts.fetch;
+    const f = opts.fetch as unknown;
     if (f !== undefined && typeof f !== "function") {
       throw new Error("fetch must be a function (a fetch-compatible transport)");
     }
-    this.fetchImpl = f ?? ((globalThis as any).fetch ? (globalThis as any).fetch.bind(globalThis) : undefined);
+    this.customFetch = f !== undefined && !DEFAULT_TRANSPORTS.has(f as object);
+    this.fetchImpl = (f ?? defaultTransport()) as any;
     if (typeof this.fetchImpl !== "function") {
       throw new Error(
         "no fetch available in this runtime — pass one as `fetch` (Node 18+ has it built in; older Node needs undici)"
@@ -1182,34 +1605,21 @@ export class Client {
     if (this.model) this.headers["X-WOS-Model"] = this.model;
     // An API key on plain HTTP travels readable by anyone on the path. Loopback
     // is fine (local dev, or a proxy on the same box); anything else gets a
-    // warning, not an error, so private-network gateways keep working.
-    // Parse, don't split. `http://127.0.0.1:9@evil.example` splits to "127.0.0.1" — the
-    // USERINFO, not the host — so this check called it loopback and stayed quiet while
-    // the key travelled in cleartext to evil.example. `new URL()` knows the difference.
-    let host: string;
-    try {
-      // `URL.hostname` keeps the brackets on an IPv6 literal — `http://[::1]:8080`
-      // gives back "[::1]", which was never in LOOPBACK_HOSTS, so a local
-      // client on the v6 loopback was told its key was travelling in cleartext when
-      // it was not. Strip them so the set matches what it is compared against.
-      host = new URL(this.base).hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    } catch {
-      host = ""; // unparseable → not loopback → warn, which is the safe direction
-    }
-    // Scheme compare is case-insensitive — `HTTP://` connects in plaintext too.
-    if (/^http:\/\//i.test(this.base) && !LOOPBACK_HOSTS.has(host)) {
+    // warning, not an error, so private-network gateways keep working. The scheme
+    // and host come from the same parser fetch uses, so `http:/host` or
+    // `http://127.0.0.1:9@evil.example` are read the way the request travels.
+    // `URL.hostname` keeps the brackets on an IPv6 literal (`[::1]`).
+    const host = url?.hostname.toLowerCase().replace(/^\[|\]$/g, "") ?? "";
+    if (url?.protocol === "http:" && !LOOPBACK_HOSTS.has(host)) {
       console.warn(
         "wontopos: baseUrl uses plain HTTP on a non-local host, so the API key travels unencrypted. Use https://."
       );
     }
 
-    // TypeScript `private` is erased at runtime: `apiKey` is an ordinary enumerable
-    // property, so `{...client}` copies it and `JSON.stringify({...client})` prints the
-    // key in full. The existing masking covers `JSON.stringify(client)` and
-    // `util.inspect(client)` — but spreading an object into a log record is the common
-    // shape in structured logging, and it went straight past both. Make the key and the
-    // prepared auth header non-enumerable so a spread cannot pick them up; they stay
-    // readable inside the class, which is all the code needs.
+    // TypeScript `private` is erased at runtime, so `{...client}` would copy the key.
+    // `toJSON` and inspect cover the direct forms; spreading into a log record is the
+    // common shape in structured logging, so the key and the prepared auth header are
+    // non-enumerable. They stay readable inside the class.
     Object.defineProperty(this, "apiKey", { enumerable: false });
     Object.defineProperty(this, "headers", { enumerable: false });
   }
@@ -1226,32 +1636,23 @@ export class Client {
     return new Client({ ...opts, apiKey: key });
   }
 
-  /** Never expose the key: `JSON.stringify(client)` gets the redacted view. */
+  /** Never expose the key or a URL password: `JSON.stringify(client)` gets the redacted view. */
   toJSON(): Record<string, string> {
-    return { baseUrl: this.base, model: this.model, userId: this.defaultUser, apiKey: maskKey(this.apiKey) };
+    return { baseUrl: maskBase(this.base), model: this.model, userId: this.defaultUser, apiKey: maskKey(this.apiKey) };
   }
 
-  /** Never expose the key: Node's `console.log(client)` gets the redacted view. */
+  /** Never expose the key or a URL password: Node's `console.log(client)` gets the redacted view. */
   [Symbol.for("nodejs.util.inspect.custom")](): string {
-    return `Client(${this.base}, model=${this.model}, userId=${this.defaultUser}, apiKey=${maskKey(this.apiKey)})`;
+    return `Client(${maskBase(this.base)}, model=${this.model}, userId=${this.defaultUser}, apiKey=${maskKey(this.apiKey)})`;
   }
 
   /** Resolve a call's store: the explicit userId, else the client default. */
   private uid(userId?: string): string {
     // An OMITTED id means "use the client's default" — that is the documented shortcut.
-    // An id that was PASSED but is blank is a different thing: the caller computed a
-    // tenant id and got nothing. Falling back there writes one customer's memories into
-    // whatever store this client defaults to, silently. Omission is a choice; a blank
-    // string is a bug, and it should say so where it happened.
-    //
-    // The check is `typeof !== "string"`, not `!String(userId).trim()`. The old form
-    // only caught a blank STRING, and the value a failed lookup actually produces in
-    // JavaScript is `null` — `String(null)` is the truthy "null", so it sailed through
-    // the guard and then `null || default` sent the write to the client's default
-    // store. `0` (an integer primary key) did the same. Both are the exact outcome the
-    // guard was written to stop, and both were still silent.
-    //
-    // `undefined` alone means "omitted", because that is what an absent argument is.
+    // An id that was PASSED but is blank, `null` or not a string is a tenant lookup
+    // that found nothing, and falling back would write one customer's memories into
+    // whatever store this client defaults to. `undefined` alone means "omitted",
+    // because that is what an absent argument is.
     assertUsableStoreId(userId);
     const id = userId ?? this.defaultUser;
     warnIfStoreIdCollapses(id);
@@ -1266,13 +1667,9 @@ export class Client {
       model: this.model,
       userId: this.defaultUser,
       maxRetries: this.maxRetries,
-      // Carry the transport across clones. Without this, `withModel(...)` and
-      // friends would silently fall back to the global fetch and a proxy-bound
-      // client would stop connecting the moment it was cloned.
-      fetch: this.fetchImpl,
-      // Carried for the same reason as `fetch` above: a clone that quietly dropped
-      // the caller's signal would keep working right up until the moment someone
-      // needed to cancel it.
+      // Carry the transport, the budget and the caller's signal across clones, so a
+      // proxy-bound or cancellable client stays that way after `withModel(...)`.
+      fetch: this.fetchImpl as unknown as FetchLike,
       deadlineMs: this.deadlineMs,
       signal: this.signal,
       ...overrides,
@@ -1290,10 +1687,8 @@ export class Client {
 
   /** A client bound to `userId` as its default store (everything else kept). */
   withUser(userId: string): Client {
-    // Stricter than the constructor on one value: `undefined`. Omitting the option means
-    // "use the default", but CALLING withUser means "bind this store", and the value a
-    // failed lookup hands you is as often `undefined` as `null`. Accepting it here would
-    // leave the one door open that this guard exists to close.
+    // CALLING withUser means "bind this store", and the value a failed lookup hands you
+    // is as often `undefined` as `null`.
     if (userId === undefined) {
       throw new Error(
         "withUser() needs a store id. It was called with undefined — usually a lookup that " +
@@ -1310,7 +1705,7 @@ export class Client {
    *     const r = await mem.withSignal(ctrl.signal).recall(q, user);
    *
    * Aborting ends the request in flight AND any backoff sleep waiting to retry it. */
-  withSignal(signal: AbortSignal): Client {
+  withSignal(signal: AbortSignalLike): Client {
     return this.clone({ signal });
   }
 
@@ -1335,10 +1730,12 @@ export class Client {
   // ----- write -----
   // `userId` is optional in every call below - omit it to use the client's default
   // store (set via `new Client({ apiKey, userId })` or `withUser`).
-  /** Store one memory. `metadata` optional — e.g. `{ event_date: "2026-03-01" }` for when the
-   * content actually happened. A plain date works (read as UTC midnight); a full RFC3339
-   * timestamp also works; older examples here show the long form.
-   * `metadata.speaker`: "me" = the assistant's own words, or a person's name (up to 50 per store).
+  /** Store one memory. `metadata` optional — the service keeps only these keys and
+   * drops any other (this client warns once per unknown key):
+   * - `event_date`: when the content actually happened, RFC3339 or a plain date
+   *   (`YYYY-MM-DD`, read as UTC midnight); anything else is refused (400) naming the field.
+   * - `speaker`: "me" = the assistant's own words, or a person's name (up to 50 per store).
+   * - `category`, `conversation_id`.
    *
    * `opts.idempotencyKey`: see {@link WriteOptions} — pass one to make YOUR retry
    * of this exact write safe to repeat. */
@@ -1346,9 +1743,10 @@ export class Client {
     checkMetadataKeys(metadata);
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, metadata };
     if (opts.image !== undefined) body.image = normalizeImage(opts.image);
+    warnOnUnknownMetadata(metadata);
     return this.post("/api/v1/memory/store", body, opts.idempotencyKey);
   }
-  /** Alias of `add` — store one memory. Same surface as the Python SDK's `store`. */
+  /** Alias of `add` — store one memory. */
   async store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
     return this.add(content, userId, metadata, opts);
   }
@@ -1361,6 +1759,8 @@ export class Client {
     );
   }
   /** Bulk-ingest a large blob of text in one call. For backfilling.
+   *  `timestamp` must be RFC3339 (`2026-05-02T09:00:00Z`): a plain date or any other
+   *  string is ignored, and the memory is filed at upload time.
    *  The call most worth an `opts.idempotencyKey`: a backfill that dies halfway and is
    *  re-run would otherwise ingest the whole blob a second time. */
   async addBulk(content: string, userId?: string, category = "general", timestamp?: string, opts: WriteOptions = {}): Promise<StatusResult> {
@@ -1381,34 +1781,39 @@ export class Client {
   /** Search a store's memories. Returns them most relevant first.
    *
    *  `limit` is 5-20, and out of range is refused rather than clamped: asking for 50
-   *  and silently receiving 20 reads as "that is all there is". The default is 10, so
-   *  a call that passes no count is unaffected. Before 2.2.35 the count was sent on
-   *  unchecked.
+   *  and silently receiving 20 reads as "that is all there is". The default is 10.
    *
-   *  `limit` bounds `memories`, not the returned array. The assistant's own words
-   *  (Scroll 1.2+) and image memories (Tablet 2+, one unless `max_images` says
-   *  otherwise) come back in it as well, so it can hold more than `limit`. They are
-   *  billed either way. Size a prompt window on the array you get back, not on
-   *  `limit`. `searchFull()` hands the fields back apart. */
+   *  `limit` bounds `memories`, not the returned array. The assistant's own words (on
+   *  a model that lists `self_memories` in its capabilities) and image memories (one
+   *  unless `max_images` says otherwise, on a model that lists `images`) come back in
+   *  it as well, so it can hold more than `limit`. They are billed either way. Size a
+   *  prompt window on the array you get back, not on `limit`. `searchFull()` hands the
+   *  fields back apart.
+   *
+   *  `filters` apply to `memories` only; the assistant's own words merged in here are
+   *  not filtered. */
   async search(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<Memory[]> {
     // Reserved fields win over ...opts: an app that forwards untrusted input as
     // opts must not be able to override the store (user_id), query, or limit.
     checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
+    limit ??= 10; // `null`, like `undefined`, means the default
     checkCount(limit, "limit");
     const { extra, ...known } = opts;
     const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
     return mergeResults(r);
   }
-  /** Search a self-memory model (Scroll 1.2+): both fields from ONE call. Returns
-   * `{ memories, self_memories }` — `memories` is what others said and general
+  /** Search, with the assistant's own words kept apart: both fields from ONE call.
+   * Returns `{ memories, self_memories }` — `memories` is what others said and general
    * memories, `self_memories` is the assistant's OWN words (stored with speaker
    * "me"), kept apart so whoever reads them never confuses who said what. On a model
-   * that does not keep them apart, `self_memories` is `[]`. Image memories are not
-   * included; `search` and `searchFull` carry them. `userId` may be omitted. */
+   * that does not list `self_memories` in its capabilities, `self_memories` is `[]`.
+   * Image memories are not included; `search` and `searchFull` carry them. `filters`
+   * apply to `memories` only. `userId` may be omitted. */
   async searchSelf(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<SelfSearchResult> {
     checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
+    limit ??= 10;
     checkCount(limit, "limit");
     const { extra, ...known } = opts;
     const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
@@ -1425,12 +1830,14 @@ export class Client {
    *     r.images.length;   // the photos, apart from the text memories
    *     r.verify_used;     // how many re-ask passes actually ran (you are billed per pass)
    *
-   * Both options need Tablet 2 or newer and are refused (403) on an older engine
-   * rather than accepted and ignored.
+   * Each option needs a model that lists it in its `listModels()` capabilities
+   * (`images`, `re_ask`) and is refused (403) on any other rather than accepted and
+   * ignored. `filters` apply to `memories`; `self_memories` are not filtered.
    */
   async searchFull(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<SearchResult> {
     checkSearchOpts(opts);
     warnOnUnknownFilters(opts.filters);
+    limit ??= 10;
     checkCount(limit, "limit");
     const { extra, ...known } = opts;
     const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
@@ -1444,12 +1851,11 @@ export class Client {
     };
   }
   /** One-call LLM context: short-term turns + long-term matches + surrounding context.
-   * `form` ("memoir"/"archive", Scroll 1.2+) renders each long-term memory's time in
-   * that form; `tz` is your UTC-offset hours for that rendering. */
+   * `form` ("memoir"/"archive", on a model that lists `forms` in its capabilities)
+   * renders each long-term memory's time in that form; `tz` is your UTC-offset hours
+   * for that rendering. */
   // `async` so an argument mistake arrives the way every other failure does — a
-  // rejected promise. Validating inside a non-async method threw synchronously, so
-  // `mem.recall(...).catch(h)` walked straight past the handler while the identical
-  // mistake in `search` (which is async) landed in it. Two shapes for one error.
+  // rejected promise, which `.catch()` sees.
   async recall(
     query: string,
     userId?: string,
@@ -1460,23 +1866,22 @@ export class Client {
        * Long-term memories to recall, 5–20. Default 10. Out of range is refused, not
        * clamped — asking for 20 and silently getting 10 reads as "that is all there is".
        *
-       * Needs a limit-aware model. An older one recalls a fixed ten no matter what you
-       * send, so the API refuses the call (403) rather than answering with a number you
-       * did not ask for.
+       * A model that does not take a recall count refuses the call (403) rather than
+       * answering with a number you did not ask for.
        */
       limit?: number;
       /** How much surrounding context is attached around the best match, 0–20. Default 10;
-       *  0 attaches none. Same model floor as `limit`. */
+       *  0 attaches none. Refused (403) by the same models as `limit`. */
       context_limit?: number;
     } = {},
   ): Promise<RecallResult> {
     checkOpts(opts, KNOWN_RECALL_KEYS, "recall");
     const body: Record<string, unknown> = { user_id: this.uid(userId), query };
-    if (opts.limit !== undefined) {
+    if (opts.limit != null) {
       checkCount(opts.limit, "limit");
       body.limit = opts.limit;
     }
-    if (opts.context_limit !== undefined) {
+    if (opts.context_limit != null) {
       checkContextLimit(opts.context_limit);
       body.context_limit = opts.context_limit;
     }
@@ -1485,7 +1890,8 @@ export class Client {
   /** Run a built-in engram ("deep_recall" | "timeline" | "gather" | "equilibrium" |
    * "tone_stabilizer"; the service is the authority — an unknown name comes back with
    * the list it accepts). Returns the merged result.
-   * `form`/`tz` render memory times (memoir/archive) on Scroll 1.2+, same as search/recall. */
+   * `form`/`tz` render memory times (memoir/archive) on a model that lists `forms` in
+   * its capabilities, same as search/recall. */
   async engram(name: string, query: string, userId?: string, opts: { form?: string; tz?: number } = {}): Promise<EngramResult> {
     // `engram` takes the same two options as `recall`, so it gets the same guard.
     checkOpts(opts, KNOWN_ENGRAM_KEYS, "engram");
@@ -1524,9 +1930,9 @@ export class Client {
   }
   /** Fetch ONE memory by id — the text you stored, and its metadata.
    * The id is what `add`/`store` or `listMemories` returned. Same visibility as
-   * `listMemories`: an id from another store, an internal record id, or an
-   * invalidated memory rejects with `NotFoundError`. Pass `undefined` as `userId` for
-   * the default store — it is positional here, not omittable as it is in Python. */
+   * `listMemories`: an id from another store, an id `listMemories` does not return,
+   * or an invalidated memory rejects with `NotFoundError`. Pass `undefined` as
+   * `userId` for the default store — it is positional here. */
   async get(userId: string | undefined, memoryId: string): Promise<Memory> {
     // Refusals arrive as rejections, like every other method here.
     if (typeof memoryId !== "string" || !memoryId.trim()) {
@@ -1536,7 +1942,11 @@ export class Client {
   }
   /** List a store's stored memories — the text you stored, plus its metadata.
    * Paginated: pass the returned `next_cursor` back as `cursor` for the next
-   * page; a `null` cursor means the last page. Use it to browse or export a store.
+   * page, and only a cursor the service returned. A `null` cursor means there is no
+   * next page; a non-null one can still be followed by an empty page. Use it to
+   * browse or export a store.
+   *
+   * `limit` is 1-500 (default 100); anything else is refused before the request.
    *
    *     let cursor: string | null = null;
    *     const all: Memory[] = [];
@@ -1547,32 +1957,39 @@ export class Client {
    *     } while (cursor);
    */
   async listMemories(userId?: string, opts: { limit?: number; cursor?: string } = {}): Promise<MemoryPage> {
-    const body: Record<string, unknown> = { user_id: this.uid(userId), limit: opts.limit ?? 100 };
+    const limit = optRange(opts.limit, "limit", 1, LIST_LIMIT_MAX);
+    const body: Record<string, unknown> = { user_id: this.uid(userId), limit: limit ?? 100 };
     if (opts.cursor) body.cursor = opts.cursor;
     return this.post("/api/v1/memory/list", body);
   }
   /** Async-iterate every stored memory in a store, paging under the hood — no cursor
-   * bookkeeping. The text you stored and its metadata only.
+   * bookkeeping. The text you stored and its metadata only. `pageSize` is 1-500.
+   *
+   * A walk that cannot reach the end of the store (the service hands back a cursor it
+   * already gave after a non-empty page, or the page ceiling is reached) throws rather
+   * than end with part of the store.
    *
    *     for await (const m of mem.iterMemories()) console.log(m.id, m.content);
    */
   async *iterMemories(userId?: string, opts: { pageSize?: number } = {}): AsyncGenerator<Memory> {
     let cursor: string | undefined;
     const seen = new Set<string>();
-    // Backstop: the cursor-repeat guard catches a repeated cursor, but not a
-    // server that mints a FRESH cursor every page forever — bound the walk.
+    // The repeat check catches a cursor cycle; the page ceiling catches a server that
+    // mints a fresh cursor every page forever.
     for (let page = 0; page < MAX_PAGES; page++) {
       const p = await this.listMemories(userId, { limit: opts.pageSize ?? 100, cursor });
-      for (const m of asRecords<Memory>(p.memories)) yield m;
+      const rows = asRecords<Memory>(p.memories);
+      for (const m of rows) yield m;
       const next = p.next_cursor ?? undefined;
-      if (!next || seen.has(next)) return;
+      if (!next) return;
+      if (seen.has(next)) {
+        if (rows.length) throw truncatedWalk(`stopped at page ${page + 1}: the service repeated a cursor, so the store did not end.`);
+        return;
+      }
       seen.add(next);
       cursor = next;
     }
-    throw new Error(
-      `stopped after ${MAX_PAGES} pages — the store did not end. This is a truncated ` +
-        `answer, not the whole store.`
-    );
+    throw truncatedWalk(`stopped after ${MAX_PAGES} pages — the store did not end.`);
   }
   /** Collect ALL of a store's memories into an array (the text you stored, and its metadata). */
   async exportMemories(userId?: string): Promise<Memory[]> {
@@ -1581,13 +1998,13 @@ export class Client {
     return out;
   }
   /** Collect ALL of a store's image memories into an array — the image-side pair of
-   *  `exportMemories`. */
+   *  `exportMemories`. `pageSize` is 5-20. */
   async exportImages(userId?: string, opts: { pageSize?: number } = {}): Promise<Memory[]> {
     const out: Memory[] = [];
     for await (const m of this.iterImages(userId, opts)) out.push(m);
     return out;
   }
-  // ----- images (Tablet 2 and newer) -----
+  // ----- images (models that list `images` in their capabilities) -----
 
   /**
    * Fetch the bytes of an image memory — the picture the SERVICE holds.
@@ -1601,9 +2018,9 @@ export class Client {
    *
    * The type is sniffed from the bytes themselves rather than from whatever the file
    * was called, so name the file from `contentType` rather than from what you sent.
-   * When the format changed, the response also carries `x-wos-image-converted-from`
-   * naming what you uploaded. Rejects with `NotFoundError` when this memory has no
-   * image, or when the service keeps no image bytes at all — it says "no" instead of
+   * Rejects with `NotFoundError` when this memory has no image, or when the service
+   * keeps no image bytes for it — which is always the case for an image stored with
+   * `reference`: fetch that one from your own reference. It says "no" instead of
    * handing back something empty, so "a memory with no image" never looks the same as
    * "an image we lost".
    *
@@ -1621,10 +2038,9 @@ export class Client {
   /**
    * Remove the PHOTO from a memory, keeping its text.
    *
-   * Except when there is no text: an image stored without a caption *is* the memory, so
-   * deleting the image deletes it. That is the one case worth checking before you
-   * commit, which is what `preview` is for — it reports `memory_kept` and changes
-   * nothing.
+   * `preview: true` reports what would happen, including `memory_kept`, and changes
+   * nothing. Retried like `deleteStore`; without `preview`, a 404 after an ambiguous
+   * failure carries the same note.
    *
    *     const p = await mem.forgetImage(undefined, id, { preview: true });
    *     if (p.memory_kept === false) { /* this would delete the whole memory *\/ }
@@ -1638,7 +2054,8 @@ export class Client {
       throw new Error("memoryId is required — the id of the memory whose image you want removed.");
     }
     const body: Record<string, unknown> = { user_id: this.uid(userId), memory_id: memoryId.trim() };
-    if (opts.preview) body.preview = true;
+    if (!opts.preview) return this.remove("/api/v1/memory/image", body);
+    body.preview = true;
     return this.request("DELETE", "/api/v1/memory/image", body);
   }
 
@@ -1650,46 +2067,46 @@ export class Client {
    * `next_before` and `next_skip_ids` back as `before` / `skipIds`. The pair exists
    * because several images can share a timestamp, and a timestamp alone would either
    * repeat them or skip them.
+   *
+   * `limit` is 5-20; anything else is refused before the request.
    */
   async listImages(
     userId?: string,
     opts: { limit?: number; before?: string; skipIds?: string[] } = {},
   ): Promise<ImagePage> {
+    const limit = optRange(opts.limit, "limit", PAGE_LIMIT_MIN, PAGE_LIMIT_MAX);
     const body: Record<string, unknown> = { user_id: this.uid(userId) };
-    if (opts.limit !== undefined) body.limit = opts.limit;
+    if (limit !== undefined) body.limit = limit;
     if (opts.before !== undefined) body.before = opts.before;
     if (opts.skipIds !== undefined) body.skip_ids = opts.skipIds;
     return this.post("/api/v1/memory/images", body);
   }
 
-  /** Async-iterate every image memory, paging under the hood. */
+  /** Async-iterate every image memory, paging under the hood. `pageSize` is 5-20.
+   *  Like `iterMemories`, a walk that cannot reach the end throws. */
   async *iterImages(userId?: string, opts: { pageSize?: number } = {}): AsyncGenerator<Memory> {
     let before: string | undefined;
     let skipIds: string[] | undefined;
-    // Same repeat-cursor guard as `iterMemories`. A server that hands back the
-    // cursor it was just given would otherwise re-yield one page MAX_PAGES times,
-    // and the caller reads those repeats as more images. The page cap alone bounds
-    // the walk; it does not stop the duplicates.
+    // A server that hands back the cursor it was just given would re-yield one page
+    // until the page ceiling, and the caller would read the repeats as more images.
     const seen = new Set<string>();
     for (let page = 0; page < MAX_PAGES; page++) {
       const p = await this.listImages(userId, { limit: opts.pageSize, before, skipIds });
-      for (const m of asRecords<Memory>(p.images)) yield m;
-      // `return`, not `break`: the throw below is the MAX_PAGES backstop, and a
-      // `break` fell straight into it — so the ordinary end of a walk raised
-      // "the store did not end" on a store that had just ended.
+      const rows = asRecords<Memory>(p.images);
+      for (const m of rows) yield m;
       if (!p.has_more || !p.next_before) return;
       // The cursor is the PAIR: several images can share a timestamp, so `before`
       // alone repeats across pages legitimately.
       const key = `${p.next_before}|${(Array.isArray(p.next_skip_ids) ? p.next_skip_ids : []).join(",")}`;
-      if (seen.has(key)) return;
+      if (seen.has(key)) {
+        if (rows.length) throw truncatedWalk(`stopped at page ${page + 1}: the service repeated a cursor, so the store did not end.`);
+        return;
+      }
       seen.add(key);
       before = p.next_before;
       skipIds = Array.isArray(p.next_skip_ids) ? p.next_skip_ids : undefined;
     }
-    throw new Error(
-      `stopped after ${MAX_PAGES} pages — the store did not end. This is a truncated ` +
-        `answer, not the whole store.`
-    );
+    throw truncatedWalk(`stopped after ${MAX_PAGES} pages — the store did not end.`);
   }
 
   // ----- how much has this memory been edited -----
@@ -1703,9 +2120,8 @@ export class Client {
    * rewritten. Free, and it never reaches the retrieval path.
    *
    * Counts memories a transform touched (supersede, update, retract, image removed).
-   * Deletions are NOT counted: a deleted memory leaves nothing to count. Neither are
-   * the internal records derived from what you stored — nobody stored those directly,
-   * so they do not belong in a ratio that answers "how much of MY memory changed".
+   * Deletions are NOT counted: a deleted memory leaves nothing to count. `total`
+   * counts the memories you stored.
    *
    * By default this returns COUNTS ONLY, and the answer is the same size for a store
    * of a hundred memories and a store of a hundred million. That is deliberate: a model
@@ -1731,10 +2147,8 @@ export class Client {
    * Pages are ordered by when each memory was STORED, not by when it was edited.
    * The response says so in `ordered_by`.
    *
-   * Served from `/api/v1/won/*`, not `/api/v1/memory/*`. Won is the surface for calls
-   * a model makes ABOUT its memory rather than calls an application makes WITH it, and
-   * the address says so. The old path still answers, for clients published before
-   * 2026-08-18, and both share one rate-limit budget.
+   * Served from `/api/v1/won/revisions`: `/api/v1/won/*` holds the calls a model makes
+   * ABOUT its memory rather than calls an application makes WITH it.
    */
   async revisions(
     userId?: string,
@@ -1744,7 +2158,8 @@ export class Client {
        * number. One side per call — there is no way to ask for both lists at once.
        */
       include?: "revised" | "unrevised";
-      /** Memories per page. 20 is both the default and the ceiling; more is rejected. */
+      /** Memories per page, 5-20; 20 is the default. Anything else is refused before
+       *  the request. */
       limit?: number;
       /** Cursor: `next_before` from the previous page. */
       before?: string;
@@ -1752,9 +2167,10 @@ export class Client {
       skipIds?: string[];
     } = {},
   ): Promise<RevisionsResult> {
+    const limit = optRange(opts.limit, "limit", PAGE_LIMIT_MIN, PAGE_LIMIT_MAX);
     const body: Record<string, unknown> = {};
     if (opts.include !== undefined) body.include = opts.include;
-    if (opts.limit !== undefined) body.limit = opts.limit;
+    if (limit !== undefined) body.limit = limit;
     if (opts.before !== undefined) body.before = opts.before;
     if (opts.skipIds !== undefined) body.skip_ids = opts.skipIds;
     // `user_id` LAST, after the caller's fields — an `opts` spread that can land on top
@@ -1782,7 +2198,7 @@ export class Client {
    *
    * `speaker` is the tag written at store time (`metadata.speaker`) — `"me"` for the
    * assistant's own words, otherwise a person's name. Same cursor paging as
-   * `listImages`.
+   * `listImages`; `limit` is 5-20.
    *
    * `points_to_delete` is the count to show before anyone confirms a delete of this
    * speaker's memories.
@@ -1795,8 +2211,9 @@ export class Client {
     if (!speaker || typeof speaker !== "string" || speaker.trim() === "") {
       throw new Error('speaker is required — "me" for the assistant, or a person\'s name.');
     }
+    const limit = optRange(opts.limit, "limit", PAGE_LIMIT_MIN, PAGE_LIMIT_MAX);
     const body: Record<string, unknown> = { user_id: this.uid(userId), speaker: speaker.trim() };
-    if (opts.limit !== undefined) body.limit = opts.limit;
+    if (limit !== undefined) body.limit = limit;
     if (opts.before !== undefined) body.before = opts.before;
     if (opts.skipIds !== undefined) body.skip_ids = opts.skipIds;
     return this.post("/api/v1/memory/by-speaker", body);
@@ -1823,9 +2240,9 @@ export class Client {
    *
    * Ask rather than hard-code: a name copied from the docs freezes a caller to the
    * catalogue as it was that day, and anything added later stays invisible. The
-   * service is the authority. What
-   * comes back depends on the model (delivery forms need Scroll 1.2+), so pass
-   * `withModel()` if you want another model's catalogue.
+   * service is the authority. What comes back depends on the model (`forms` is empty
+   * on one that does not list `forms` in its capabilities), so pass `withModel()` if
+   * you want another model's catalogue.
    *
    *   const { engrams, forms } = await mem.listEngrams();
    */
@@ -1857,14 +2274,15 @@ export class Client {
     const r = await this.request("GET", "/api/v1/memory/collections");
     return asRecords<StoreInfo>(r.collections);
   }
-  /** Delete a store and ALL its memories. Returns `{ user_id, status }`. */
+  /** Delete a store and ALL its memories. Returns `{ user_id, status }`.
+   *  A delete retried after an ambiguous failure (408/502/503/504 or a dropped
+   *  connection) that then answers 404 rejects with a `NotFoundError` saying an
+   *  earlier attempt may already have deleted it. */
   async deleteStore(userId: string): Promise<StoreOpResult> {
-    // Validate before warning. The warning helper lowercases the id, so a non-string
-    // reaches it and dies as "id.toLowerCase is not a function" — a TypeError from
-    // inside the SDK instead of a sentence about the id.
+    // Validate before warning: the warning helper lowercases the id.
     if (typeof userId !== "string" || !userId.trim()) throw new Error("userId is required (a non-blank string) — deleteStore never falls back to the default store.");
     warnIfStoreIdCollapses(userId); // destructive: the collision warning belongs here too
-    return this.request("DELETE", "/api/v1/memory/collection", { user_id: userId });
+    return this.remove("/api/v1/memory/collection", { user_id: userId });
   }
 
   // ----- speakers (who said it) -----
@@ -1878,19 +2296,18 @@ export class Client {
   /** The store's registered people, each with its memory count. */
   async listSpeakers(userId?: string): Promise<SpeakersList> {
     const r = await this.request("GET", `/api/v1/memory/speakers?user_id=${encodeURIComponent(this.uid(userId))}`);
-    // The spread came second, so a present-but-null `speakers` overwrote the default
-    // and the caller got null typed as an array. Every other list route goes through
-    // asRecords; this one did not.
+    // The normalized list goes last, so a present-but-null `speakers` still arrives as [].
     return { ...r, speakers: asRecords(r?.speakers) } as SpeakersList;
   }
-  /** Unregister a person. Their memories stay; the name tag goes. */
+  /** Unregister a person. Their memories stay; the name tag goes. Retried like
+   *  `deleteStore`, with the same note on a 404 after an ambiguous failure. */
   async removeSpeaker(speaker: string, userId?: string): Promise<SpeakerOpResult> {
-    return this.request("DELETE", "/api/v1/memory/speakers", { user_id: this.uid(userId), speaker });
+    return this.remove("/api/v1/memory/speakers", { user_id: this.uid(userId), speaker });
   }
 
   // ----- delete -----
   /** Delete a single memory by id. Pass `undefined` as `userId` for the default
-   *  store — it is positional here, not omittable as it is in Python. */
+   *  store — it is positional here. */
   async delete(userId: string | undefined, memoryId: string): Promise<StatusResult> {
     // Guard: without a memory_id the API's forget endpoint means "delete the
     // whole store". An undefined/"" slipping in here must never become a wipe.
@@ -1917,19 +2334,12 @@ export class Client {
   private post(path: string, body: unknown, idempotencyKey?: string): Promise<any> {
     return this.request("POST", path, body, idempotencyKey);
   }
+  /** A DELETE that removes something: a 404 after an ambiguous failure says an earlier
+   *  attempt may already have removed it. */
+  private remove(path: string, body: unknown): Promise<any> {
+    return this.request("DELETE", path, body, undefined, true);
+  }
 
-  /**
-   * One request that answers with BYTES rather than JSON.
-   *
-   * Only `/memory/image` does this, and it is why this cannot go through `request()`:
-   * that path reads the body as text and insists the result parses to a JSON object.
-   * Feeding it a JPEG would throw "invalid JSON in response" — a confusing error for a
-   * call that actually succeeded.
-   *
-   * Errors still arrive as JSON, so those are handed back to the normal machinery: on
-   * a non-2xx we re-read the body as text and reuse `errorFor`, which keeps 404
-   * (`NotFoundError`) and 401 behaving the same as everywhere else.
-   */
   /** Where this call's budget runs out, or `undefined` when it has none. Computed
    *  once per call, not per attempt — a budget recomputed each attempt is not a
    *  budget. */
@@ -1939,30 +2349,30 @@ export class Client {
 
   /** The abort wiring for ONE attempt: this SDK's per-attempt timeout, the caller's
    *  signal, and whatever is left of the overall deadline — whichever fires first.
-   *
-   *  One function, two callers (`request` and `requestBytes`), because a guard living
-   *  in one of two request paths is exactly how `getImage` ended up with no retry loop
-   *  while the module doc promised every call had one. */
-  private beginAttempt(deadlineAt?: number): {
+   *  With no time left it throws `answer` (the refusal that led here), or the
+   *  deadline error when there is none. */
+  private beginAttempt(deadlineAt?: number, answer?: WosError): {
     signal: AbortSignal;
     clear: () => void;
     why: () => "timeout" | "deadline" | "caller";
+    /** When this attempt's time runs out (ms since the epoch). */
+    endsAt: number;
   } {
     let why: "timeout" | "deadline" | "caller" = "timeout";
     let budget = this.timeoutMs;
     if (deadlineAt !== undefined) {
       const left = deadlineAt - Date.now();
-      // Refuse rather than open a socket there is no time to use. Clamping the budget
-      // to 0 and beginning the attempt anyway leaves `setTimeout(…, 0)` — it fires on
-      // the next timer phase — racing a fetch that a fast server answers first, so the
-      // same call sometimes reports its deadline and sometimes returns a result.
-      if (left <= 0) throw new APIConnectionError(0, this.abortMessage("deadline"));
+      // Refuse rather than open a socket there is no time to use: a 0ms timer races a
+      // fast server, and the same call would sometimes report its deadline and
+      // sometimes return a result.
+      if (left <= 0) throw answer ?? new APIConnectionError(0, this.abortMessage("deadline"));
       if (left < budget) {
         budget = left;
         why = "deadline";
       }
     }
     const ctrl = new AbortController();
+    const endsAt = Date.now() + budget;
     const timer = setTimeout(() => ctrl.abort(), budget);
     const outer = this.signal;
     const onCaller = () => {
@@ -1971,9 +2381,8 @@ export class Client {
     };
     if (outer) {
       if (outer.aborted) onCaller();
-      // Removed in clear(). `{ once: true }` would not be enough: one long-lived
-      // signal per user session would still collect one listener per request until
-      // the session ended.
+      // Removed in clear(), so one long-lived signal per user session does not collect
+      // a listener per request.
       else outer.addEventListener("abort", onCaller);
     }
     return {
@@ -1983,6 +2392,7 @@ export class Client {
         outer?.removeEventListener("abort", onCaller);
       },
       why: () => why,
+      endsAt,
     };
   }
 
@@ -1995,19 +2405,13 @@ export class Client {
     return `request timed out after ${this.timeoutMs}ms`;
   }
 
-  /** Sleep between attempts — but wake the moment the caller aborts, and give up
-   *  rather than wait out a backoff the budget cannot cover. A backoff that runs to
-   *  completion after the caller gave up wastes exactly as long as the request it was
-   *  waiting to repeat.
-   *
-   *  Clamping the wait to what is left and retrying anyway is the same answer as
-   *  having no deadline at all: the call still spends the whole allowance, and the one
-   *  attempt it buys has nothing left to finish in. If the wait does not fit, the
-   *  budget is already decided. */
-  private async backoffSleep(ms: number, deadlineAt?: number): Promise<void> {
-    if (deadlineAt !== undefined && ms > deadlineAt - Date.now()) {
-      throw new APIConnectionError(0, this.abortMessage("deadline"));
-    }
+  /** Whether a wait of `ms` still leaves time before the deadline. */
+  private fits(ms: number, deadlineAt?: number): boolean {
+    return deadlineAt === undefined || ms <= deadlineAt - Date.now();
+  }
+
+  /** Sleep between attempts, waking the moment the caller aborts. */
+  private async pause(ms: number): Promise<void> {
     const outer = this.signal;
     if (!outer) {
       await new Promise((r) => setTimeout(r, ms));
@@ -2025,211 +2429,134 @@ export class Client {
     });
   }
 
-  private async requestBytes(path: string, body: unknown): Promise<ImageBytes> {
-    // This route had no retry loop at all, while the module doc promised "every call
-    // retries transient failures … 429 always". Measured with maxRetries: 4 against a
-    // server answering 429 — stats() made five requests, getImage() made one. The
-    // largest and most rate-limit-prone call in the SDK was the one that gave up
-    // immediately. The loop lives inside the function because honouring `Retry-After`
-    // means still holding the response.
-    const attempts = this.maxRetries + 1;
-    const deadlineAt = this.deadlineAt();
-    for (let attempt = 0; ; attempt++) {
-    const att = this.beginAttempt(deadlineAt);
-    let res: Response;
-    try {
-      res = await this.fetchImpl(`${this.base}${path}`, {
-        method: "POST",
-        headers: this.headers,
-        body: JSON.stringify(body),
-        signal: att.signal,
-        redirect: "manual",
-      });
-    } catch (e: any) {
-      att.clear();
-      const timedOut = e?.name === "AbortError" || att.signal.aborted;
-      // Same rule as `request()`: a connect-level failure never reached the server,
-      // so re-sending cannot double-process anything. The 429 loop below was added
-      // in 2.2.35 and this branch was not, which left the module doc's promise —
-      // "every call retries transient failures" — still false for `getImage` on
-      // exactly the failure a retry is for. A timeout is ambiguous and stays final.
-      if (!timedOut && isConnectFailure(e) && attempt + 1 < attempts) {
-        await this.backoffSleep(this.backoffMs(attempt), deadlineAt);
-        continue;
-      }
-      throw new APIConnectionError(0, timedOut ? this.abortMessage(att.why()) : `network error: ${e?.message ?? e}`);
-    }
-    try {
-      this._rateLimit = parseRateLimit(res.headers) ?? this._rateLimit;
-      if ((res.status >= 300 && res.status < 400) || res.type === "opaqueredirect") {
-        void res.body?.cancel();
-        throw errorFor(res.status, "the API answered with a redirect; refusing to follow it");
-      }
-      if (!res.ok) {
-        if (RETRY_ALWAYS.has(res.status) && attempt + 1 < attempts) {
-          const retryAfter = res.headers.get("Retry-After");
-          void res.body?.cancel();
-          att.clear();
-          await this.backoffSleep(this.backoffMs(attempt, retryAfter), deadlineAt);
-          continue;
-        }
-        let msg = await this.readCapped(res).catch(() => "");
-        try {
-          const data = JSON.parse(msg);
-          const err = (data as any)?.error;
-          if (err && typeof err === "object") msg = err.message ?? err.type ?? msg;
-          else if (typeof err === "string") msg = err;
-        } catch {
-          /* keep raw text */
-        }
-        if (msg.length > MAX_ERR_MSG) msg = msg.slice(0, MAX_ERR_MSG) + "…(truncated)";
-        throw errorFor(res.status, msg || `HTTP ${res.status}`);
-      }
-      // Translated, not raw. A timeout that fires while the body is streaming used to
-      // escape as `AbortError` — not a WosError, not an APIConnectionError — so a
-      // caller's `catch (e) { if (e instanceof WosError) … }` handled every JSON route
-      // and let this one through unclassified. The JSON path already translated it.
-      let buf: Uint8Array;
+  /** The error for a request that got no answer. The message names the cause code
+   *  (ECONNREFUSED, ENOTFOUND, CERT_HAS_EXPIRED, …) and never carries the query
+   *  string, which can hold a store id, or the base URL's userinfo. With either in
+   *  the URL the transport error is not kept as the cause, since its own message can
+   *  quote the URL. */
+  private networkError(e: any, path: string): APIConnectionError {
+    let text = typeof e?.message === "string" && e.message ? e.message : String(e);
+    const q = path.indexOf("?");
+    if (q !== -1) {
+      const query = path.slice(q);
+      text = text.split(query).join("");
       try {
-        buf = await this.readCappedBytes(res);
-      } catch (e: any) {
-        if (e?.name === "AbortError" || att.signal.aborted) {
-          // ★Say WHICH abort. `ctrl` could only ever be aborted by the per-attempt
-          //  timer, so a fixed "timed out" was true when this line read `ctrl`. It
-          //  now reads `att`, which also fires for the caller's AbortSignal and for
-          //  an exhausted deadline — and this branch kept reporting both as a 30s
-          //  timeout the caller never set. Two sibling sites were moved to
-          //  abortMessage and these two were not; the tests abort before the fetch
-          //  resolves, so they only ever reached the sites that were fixed.
-          throw new APIConnectionError(0, this.abortMessage(att.why()));
-        }
-        if (e instanceof WosError) throw e; // the size cap — already the right error
-        // A body that stops arriving is a transport failure.
-        throw new APIConnectionError(0, `network error: ${e?.message ?? e}`);
+        text = text.split(decodeURIComponent(query)).join("");
+      } catch {
+        /* the query was not percent-encoded */
       }
-      if (buf.byteLength === 0) {
-        // An empty 200 would otherwise read as "here is your image" and write a
-        // zero-byte file — indistinguishable from an image we lost.
-        throw new WosError(res.status, "empty image body — the service returned no bytes");
-      }
-      return { bytes: buf, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
-    } finally {
-      att.clear();
     }
-    }
+    text = cleanServerText(maskUserinfo(text), 512);
+    const code = causeCode(e);
+    if (code && !text.includes(code)) text += ` (${code})`;
+    const quotable = this.userinfo || q !== -1;
+    return new APIConnectionError(0, `network error: ${text}`, undefined, quotable ? undefined : { cause: e });
   }
 
-  /** Validate an idempotency key BEFORE the network. The API answers a malformed
-   *  key with a 400, which on a retry path reads as "my write failed" when in fact
-   *  it was never attempted — cheaper and clearer to reject it here. */
-  private idemHeader(key?: string): Record<string, string> | undefined {
-    // `=== undefined` let `null` through: RegExp.test stringifies its argument, so
-    // `null` became the literal key "null" and passed the format check. A key read
-    // from JSON or a database row arrives as null, not undefined, and every write on
-    // that path then shared one key — the second onward returned the first response
-    // and stored nothing.
-    if (key === undefined || key === null) return undefined;
-    if (!IDEMPOTENCY_KEY_RE.test(key)) {
+  /** A redirect: a 3xx, or one a custom fetch followed. Where a custom fetch sent the
+   *  request (`res.url`) is its own business. */
+  private isRedirected(res: Response): boolean {
+    return (res.status >= 300 && res.status < 400) || res.type === "opaqueredirect" || res.redirected === true;
+  }
+
+  /** The error an answer carries: the service's message (control characters removed,
+   *  capped), request id, `type` and the rest of its error object. `unread` says why
+   *  the body is missing, when it could not be read. */
+  private errorFromAnswer(
+    res: Response,
+    body: Uint8Array,
+    retryAfter?: number,
+    mayBeDeleted = false,
+    unread?: string,
+  ): WosError {
+    const e = parseErrorText(new TextDecoder().decode(body));
+    let msg = cleanServerText(e.message) || `HTTP ${res.status}`;
+    if (unread) msg += ` (the error body could not be read: ${cleanServerText(unread, 512)})`;
+    const requestId = e.requestId === undefined ? undefined : cleanServerText(e.requestId, 256) || undefined;
+    const err = errorFor(res.status, msg, requestId, {
+      type: e.type === undefined ? undefined : cleanServerText(e.type, 256) || undefined,
+      details: cleanDetails(e.details),
+      retryAfter: retryAfter === undefined ? undefined : Math.ceil(retryAfter / 1000),
+    });
+    if (mayBeDeleted && err instanceof NotFoundError) {
+      err.message += " (an earlier attempt may already have deleted it)";
+    }
+    return err;
+  }
+
+  /**
+   * Send one call, retrying what can be retried, and return the answer with its body
+   * read (under the same timeout, so a body that trickles in cannot stall the call).
+   * The error body of an answer about to be retried gets at most a second.
+   *
+   * Retried: 429, and a 409 whose error carries `retry_after_ms` (another write to the
+   * store was in flight; nothing was stored), on every method; 408/502/503/504 and
+   * dropped connections on idempotent methods; connect failures on every method. A
+   * retry whose wait is over the cap, or does not fit the deadline, is not made: the
+   * call fails with the error of the response it has. So does a retry the deadline
+   * leaves no time to send, and the retry of an idempotent method or `getImage` that
+   * the deadline cuts short. Any other retry cut short stays a status-0 deadline error:
+   * a write may have been applied.
+   */
+  private async send(
+    method: string,
+    path: string,
+    payload: string | undefined,
+    extraHeaders?: Record<string, string>,
+    removes = false,
+    // A POST that only reads: a deadline that cuts its retry short reports the answer
+    // before it, as for an idempotent method.
+    reads = false,
+  ): Promise<{ res: Response; body: Uint8Array }> {
+    // A relative base with no page to resolve it against cannot be sent anywhere. An
+    // argument error, like the other refusals before sending: status 0 would read as
+    // a transport failure worth retrying.
+    if (this.pageRelative && !this.customFetch && !parseBase(this.base)) {
       throw new Error(
-        `invalid idempotencyKey: ${JSON.stringify(key)} — 1-128 chars of [A-Za-z0-9._:-]`,
+        `${notAUrl(this.base)}. A relative baseUrl needs a page to resolve against, and this runtime has none.`,
       );
     }
-    return { "Idempotency-Key": key };
-  }
-
-  /** Seconds→ms to sleep before retry `attempt` (0-based). Honors Retry-After. */
-  private backoffMs(attempt: number, retryAfter?: string | null): number {
-    if (retryAfter) {
-      const s = Number(retryAfter);
-      if (Number.isFinite(s) && s >= 0) return Math.min(30_000, s * 1000);
-      // HTTP-date form (RFC 9110), e.g. "Wed, 21 Oct 2015 07:28:00 GMT".
-      const t = Date.parse(retryAfter);
-      if (Number.isFinite(t)) return Math.min(30_000, Math.max(0, t - Date.now()));
-    }
-    return Math.min(8_000, 500 * 2 ** attempt) + Math.random() * 250;
-  }
-
-  /** Read the body with a hard size cap, so a broken/hostile endpoint can't
-   * make the process buffer gigabytes. */
-  private async readCapped(res: Response): Promise<string> {
-    return new TextDecoder().decode(await this.readCappedBytes(res));
-  }
-
-  /** The same cap, for a body that is not text.
-   *
-   * `arrayBuffer()` would buffer whatever arrives. The cap exists for a hostile or
-   * broken `baseUrl`, and an endpoint that returns megabytes is where that costs the
-   * most. One implementation, two callers, so they cannot drift. */
-  private async readCappedBytes(res: Response): Promise<Uint8Array> {
-    const cl = res.headers.get("content-length");
-    if (cl && Number(cl) > MAX_RESPONSE_BYTES) {
-      throw new WosError(res.status, `response too large (${cl} bytes) — refusing to buffer it`);
-    }
-    if (!res.body) {
-      // `arrayBuffer()` has no ceiling, and only the content-length pre-check stands
-      // in front of it — which a server simply omits. Reachable through the documented
-      // `fetch` seam (test doubles, polyfills, wrappers that rebuild the Response),
-      // and the option's own doc promises "the size cap still applies". Measured: a
-      // body-less Response with no content-length buffered 73MB past the 64MB cap.
-      const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.byteLength > MAX_RESPONSE_BYTES) {
-        throw new WosError(res.status, `response too large (${buf.byteLength} bytes) — refusing it`);
-      }
-      return buf;
-    }
-    const reader = res.body.getReader();
-    const parts: Uint8Array[] = [];
-    let size = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > MAX_RESPONSE_BYTES) {
-        void reader.cancel();
-        throw new WosError(res.status, "response too large — refusing to buffer it");
-      }
-      parts.push(value);
-    }
-    const buf = new Uint8Array(size);
-    let off = 0;
-    for (const p of parts) {
-      buf.set(p, off);
-      off += p.byteLength;
-    }
-    return buf;
-  }
-
-  private async request(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<any> {
-    const extraHeaders = this.idemHeader(idempotencyKey);
     const attempts = this.maxRetries + 1;
+    const upper = method.toUpperCase();
+    const idempotent = IDEMPOTENT_METHODS.has(upper);
     // Debug logging shows the path WITHOUT its query string — a query can carry
     // a store id (listSpeakers), and logs must never carry data.
     const logPath = path.split("?")[0];
     const deadlineAt = this.deadlineAt();
-    // Serialized ONCE, and outside the fetch try. Inside it, an ORM entity with a
-    // bidirectional relation or a BigInt column in `metadata` made JSON.stringify throw
-    // and came back as APIConnectionError with status 0 — a status this file reserves
-    // for "the request never got a response", so a caller retrying on it retried a
-    // deterministic local mistake forever. On an idempotent method the loop also slept
-    // out the whole retry budget first: measured 7,961ms for removeSpeaker(123n) at
-    // maxRetries 4, with zero requests sent. An argument mistake is a plain Error.
-    let payload: string | undefined;
-    try {
-      payload = body === undefined ? undefined : JSON.stringify(body);
-    } catch (e) {
-      throw new Error(
-        `request body could not be serialized: ${e instanceof Error ? e.message : String(e)}. ` +
-          "Pass plain JSON values — an ORM entity, a BigInt or a circular reference cannot be sent.",
-      );
-    }
-    for (let attempt = 0; attempt < attempts; attempt++) {
+    const headers = extraHeaders ? { ...this.headers, ...extraHeaders } : this.headers;
+    // Set once an attempt may have reached the service without an answer we could read.
+    let ambiguous = false;
+    // The refused answer that led to the next attempt. It is what the call reports when
+    // the deadline leaves that attempt nothing of its own to report.
+    let refused: WosError | undefined;
+    for (let attempt = 0; ; attempt++) {
+      const last = attempt + 1 >= attempts;
+      const tag = `(attempt ${attempt + 1}/${attempts})`;
       const start = Date.now();
-      const att = this.beginAttempt(deadlineAt);
+      const previous = refused;
+      refused = undefined;
+      // No time left to send this attempt: the answer before it is the result.
+      const att = this.beginAttempt(deadlineAt, previous);
+      /** Wait out a failure that left no answer. A wait the deadline cannot fit ends the
+       *  call with the answer before it, or with the deadline when there is none. */
+      const pauseWithoutAnswer = async (why: string): Promise<void> => {
+        const delay = this.backoffMs(attempt);
+        if (!this.fits(delay, deadlineAt)) throw previous ?? new APIConnectionError(0, this.abortMessage("deadline"));
+        logDebug(`${method} ${logPath}: ${why}. Retrying in ${Math.round(delay)}ms ${tag}`);
+        await this.pause(delay);
+      };
+      /** The error for an attempt cut short. A read the deadline cut reports the answer
+       *  before it; a write reports the deadline, since it may have been applied. */
+      const cutShort = (): WosError => {
+        const why = att.why();
+        if (why === "deadline" && (idempotent || reads) && previous) return previous;
+        return new APIConnectionError(0, this.abortMessage(why));
+      };
       let res: Response;
       try {
         res = await this.fetchImpl(`${this.base}${path}`, {
           method,
-          headers: extraHeaders ? { ...this.headers, ...extraHeaders } : this.headers,
+          headers,
           body: payload,
           signal: att.signal,
           // Never follow a redirect: fetch would forward the API key to
@@ -2240,135 +2567,268 @@ export class Client {
         att.clear();
         // Timeouts are ambiguous (the write may have landed) — don't retry those.
         const timedOut = e?.name === "AbortError" || att.signal.aborted;
-        // Other network errors retry only when a retry can't double-process a
-        // write: idempotent methods always; writes only for connect-level
-        // failures (the request never reached the server). A mid-stream drop on
-        // a POST may already have landed.
-        const safe = IDEMPOTENT_METHODS.has(method.toUpperCase()) || isConnectFailure(e);
-        if (!timedOut && safe && attempt + 1 < attempts) {
-          const delay = this.backoffMs(attempt);
-          logDebug(`${method} ${logPath}: ${e?.code ?? e?.name ?? "network error"} — retrying in ${delay}ms (attempt ${attempt + 1}/${attempts})`);
-          await this.backoffSleep(delay, deadlineAt);
+        if (timedOut) throw cutShort();
+        // Other network errors retry only when a retry can't double-process a write:
+        // idempotent methods always; writes only when the connection never opened.
+        const connect = isConnectFailure(e);
+        if ((idempotent || connect) && !last) {
+          if (!connect) ambiguous = true;
+          await pauseWithoutAnswer(e?.code ?? e?.name ?? "network error");
           continue;
         }
-        throw new APIConnectionError(0, timedOut ? this.abortMessage(att.why()) : `network error: ${e?.message ?? e}`);
+        throw this.networkError(e, path);
       }
-      const retryable =
-        RETRY_ALWAYS.has(res.status) ||
-        (RETRY_IF_IDEMPOTENT.has(res.status) && IDEMPOTENT_METHODS.has(method.toUpperCase()));
-      if (retryable && attempt + 1 < attempts) {
-        att.clear();
-        const retryAfter = res.headers.get("Retry-After");
-        void res.body?.cancel();
-        const delay = this.backoffMs(attempt, retryAfter);
-        logDebug(`${method} ${logPath} -> ${res.status} — retrying in ${delay}ms (attempt ${attempt + 1}/${attempts})`);
-        await this.backoffSleep(delay, deadlineAt);
-        continue;
-      }
-      if ((res.status >= 300 && res.status < 400) || res.type === "opaqueredirect") {
-        att.clear();
-        void res.body?.cancel(); // release the stream — otherwise the connection leaks
-        throw new WosError(
-          res.status,
-          "unexpected redirect — refused (the API key never follows a redirect). Check baseUrl: exact host, https://."
-        );
-      }
-      this._rateLimit = parseRateLimit(res.headers) ?? this._rateLimit;
-      // Keep the abort timer alive THROUGH the body read: fetch resolves on
-      // headers, so a server that sends headers then trickles/hangs the body
-      // would otherwise stall forever. An abort mid-body surfaces as a timeout.
-      let text: string;
+      /** The body, or `null` when the connection dropped mid-body and the call can be retried. */
+      const readBody = async (): Promise<Uint8Array | null> => {
+        try {
+          return await this.readCappedBytes(res);
+        } catch (e: any) {
+          if (e?.name === "AbortError" || att.signal.aborted) throw cutShort();
+          if (e instanceof WosError) throw e; // the size cap — already the right error
+          // A drop while READING the body is a transport failure. Retried on an
+          // idempotent method; a write may already have been applied.
+          if (idempotent && !last) return null;
+          throw this.networkError(e, path);
+        }
+      };
+      /** An error answer's body, within `withinMs` when given. The status is the answer,
+       *  so a body that cannot be read (dropped, cut off by the timeout, too slow, over
+       *  the size cap) is reported as missing rather than turning the answer into "no
+       *  answer". Only a cancel still wins. */
+      const readErrorBody = async (withinMs?: number): Promise<{ body: Uint8Array; unread?: string }> => {
+        try {
+          return { body: await this.readCappedBytes(res, withinMs) };
+        } catch (e: any) {
+          const aborted = e?.name === "AbortError" || att.signal.aborted;
+          if (aborted && att.why() === "caller") throw new APIConnectionError(0, this.abortMessage("caller"));
+          const unread = aborted
+            ? this.abortMessage(att.why())
+            : e instanceof SlowBody
+              ? e.message
+              : (e instanceof WosError ? e : this.networkError(e, path)).message.replace(/^\[\d+\] /, "");
+          return { body: new Uint8Array(0), unread };
+        }
+      };
       try {
-        text = await this.readCapped(res);
-      } catch (e: any) {
-        if (e?.name === "AbortError" || att.signal.aborted) {
-          // ★Say WHICH abort. `ctrl` could only ever be aborted by the per-attempt
-          //  timer, so a fixed "timed out" was true when this line read `ctrl`. It
-          //  now reads `att`, which also fires for the caller's AbortSignal and for
-          //  an exhausted deadline — and this branch kept reporting both as a 30s
-          //  timeout the caller never set. Two sibling sites were moved to
-          //  abortMessage and these two were not; the tests abort before the fetch
-          //  resolves, so they only ever reached the sites that were fixed.
-          throw new APIConnectionError(0, this.abortMessage(att.why()));
+        if (this.isRedirected(res)) {
+          discard(res);
+          throw new WosError(
+            res.status,
+            "unexpected redirect — refused (the API key never follows a redirect). Check baseUrl: exact host, https://."
+          );
         }
-        if (e instanceof WosError) throw e; // the size cap — already the right error
-        // A drop while READING the body is a transport failure — surface it as
-        // APIConnectionError, not a raw fetch TypeError. Retried on an idempotent
-        // method, like every other connection failure: replaying a GET cannot
-        // double-process anything, while a write may already have landed.
-        if (!(IDEMPOTENT_METHODS.has(method.toUpperCase()) && attempt + 1 < attempts)) {
-          throw new APIConnectionError(0, `network error: ${e?.message ?? e}`);
+        this._rateLimit = parseRateLimit(res.headers) ?? this._rateLimit;
+        if (!res.ok) {
+          const ra = retryAfterMs(res.headers.get("Retry-After"));
+          // How long to wait before retrying this status; undefined when it is not
+          // retried. A 409's comes from its body, below.
+          let wait =
+            RETRY_ALWAYS.has(res.status) || (RETRY_IF_IDEMPOTENT.has(res.status) && idempotent)
+              ? ra ?? this.backoffMs(attempt)
+              : undefined;
+          // The retry does not need the body, so a stalled one gets a moment, not the
+          // rest of the attempt.
+          const retrying = wait !== undefined && !last && wait <= MAX_RETRY_WAIT_MS && this.fits(wait, deadlineAt);
+          const { body, unread } = await readErrorBody(
+            retrying ? Math.max(0, Math.min(BRIEF_BODY_MS, att.endsAt - Date.now())) : undefined,
+          );
+          if (res.status === 409) {
+            // Only a 409 that says so is a write lock; one whose body was lost is final.
+            const d = parseErrorText(new TextDecoder().decode(body)).details;
+            const ms = d?.retry_after_ms;
+            if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0 && d?.conflicts_with === undefined) {
+              wait = Math.max(ms, this.backoffMs(attempt));
+            }
+          }
+          if (wait !== undefined && !last) {
+            if (wait > MAX_RETRY_WAIT_MS) {
+              logDebug(`${method} ${logPath} -> ${res.status}: asked to wait ${Math.round(wait)}ms, over the cap. Not retrying ${tag}`);
+            } else if (!this.fits(wait, deadlineAt)) {
+              logDebug(`${method} ${logPath} -> ${res.status}: a ${Math.round(wait)}ms wait does not fit the deadline. Not retrying ${tag}`);
+            } else {
+              if (RETRY_IF_IDEMPOTENT.has(res.status)) ambiguous = true;
+              refused = this.errorFromAnswer(res, body, ra, ambiguous && removes, unread);
+              att.clear();
+              logDebug(`${method} ${logPath} -> ${res.status}. Retrying in ${Math.round(wait)}ms ${tag}`);
+              await this.pause(wait);
+              continue;
+            }
+          }
+          logDebug(`${method} ${logPath} -> ${res.status} in ${Date.now() - start}ms ${tag}`);
+          throw this.errorFromAnswer(res, body, ra, ambiguous && removes, unread);
         }
-        att.clear();
-        const delay = this.backoffMs(attempt);
-        logDebug(`${method} ${logPath} — body dropped mid-stream, retrying in ${delay}ms (attempt ${attempt + 1}/${attempts})`);
-        await this.backoffSleep(delay, deadlineAt);
-        continue;
+        const body = await readBody();
+        if (body === null) {
+          ambiguous = true;
+          att.clear();
+          await pauseWithoutAnswer("body dropped mid-stream");
+          continue;
+        }
+        logDebug(`${method} ${logPath} -> ${res.status} in ${Date.now() - start}ms ${tag}`);
+        return { res, body };
       } finally {
         att.clear();
       }
-      logDebug(`${method} ${logPath} -> ${res.status} in ${Date.now() - start}ms (attempt ${attempt + 1}/${attempts})`);
-      if (!res.ok) {
-        // Server returns either Anthropic-style envelope
-        //   {"type":"error","error":{"type":...,"message":...,"request_id":...}}
-        // or simple {"error":"reason"}. Fall back to raw text.
-        let msg = text;
-        let requestId: string | undefined;
-        try {
-          const data = JSON.parse(text);
-          if (data && typeof data === "object") {
-            const err = (data as any).error;
-            if (err && typeof err === "object") {
-              msg = err.message ?? err.type ?? msg;
-              if (typeof err.request_id === "string") requestId = err.request_id;
-            } else if (typeof err === "string") msg = err;
-            else if (typeof (data as any).message === "string") msg = (data as any).message;
-          }
-        } catch {
-          /* keep raw text */
-        }
-        // Cap the FINAL message (a string `error` field can be as huge as the body),
-        // so a hostile server can't turn our exception/log into a giant string.
-        if (typeof msg === "string" && msg.length > MAX_ERR_MSG) msg = msg.slice(0, MAX_ERR_MSG) + "…(truncated)";
-        throw errorFor(res.status, msg, requestId);
-      }
-      // An empty body is only legal when the STATUS says there is no body. Accepting
-      // any empty 2xx would make an `add()` answered by a truncating proxy return `{}`,
-      // which reads as a successful write with no id. All three SDKs apply this rule.
-      if (!text) {
-        if (NO_BODY_STATUS.has(res.status)) return {};
-        throw new WosError(res.status, "empty response body — expected a JSON object");
-      }
-      let data: unknown;
-      try {
-        data = JSON.parse(text);
-      } catch (e: any) {
-        // A 2xx with a corrupt body is a real failure — surface it, don't leak
-        // a raw SyntaxError (parity with the Rust SDK).
-        throw new WosError(res.status, `invalid JSON in response: ${e?.message ?? e}`);
-      }
-      // Enforce a JSON OBJECT: every method reads the result with `.field`, so a
-      // body that parses to null / a number / a string / an array (a broken or
-      // hostile server) must be a clean WosError, not a `null.memories` TypeError.
-      if (data === null || typeof data !== "object" || Array.isArray(data)) {
-        const got = data === null ? "null" : Array.isArray(data) ? "array" : typeof data;
-        throw new WosError(res.status, `expected a JSON object in the response, got ${got}`);
-      }
-      // Surface whether the write was stored or replayed. The server says so with
-      // `Idempotent-Replayed: true`, and it answers the question someone using an
-      // idempotency key is asking: did my retry write, or is this the first response
-      // coming back again?
-      //
-      // Only when the body does not already carry the field. These responses are
-      // widening — a response may carry fields this client has never seen —
-      // and a client that writes into a server's object is one release away from
-      // overwriting a real answer with its own guess. What the service said wins.
-      if (res.headers.get("Idempotent-Replayed") === "true" && !("replayed" in data)) {
-        (data as Record<string, unknown>).replayed = true;
-      }
-      return data;
     }
-    throw new Error("retries exhausted"); // unreachable; keeps the compiler happy
+  }
+
+  /**
+   * One request that answers with BYTES rather than JSON.
+   *
+   * Only `/memory/image` does this: `request()` insists the body parses to a JSON
+   * object, and a JPEG would come back as "invalid JSON in response" for a call that
+   * succeeded. Retries, timeouts and errors are the same as every other call's.
+   */
+  private async requestBytes(path: string, body: unknown): Promise<ImageBytes> {
+    const { res, body: buf } = await this.send("POST", path, JSON.stringify(body), undefined, false, true);
+    if (buf.byteLength === 0) {
+      // An empty 200 would otherwise read as "here is your image" and write a
+      // zero-byte file — indistinguishable from an image we lost.
+      throw new WosError(res.status, "empty image body — the service returned no bytes");
+    }
+    return { bytes: buf, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
+  }
+
+  /** Validate an idempotency key BEFORE the network. The API answers a malformed
+   *  key with a 400, which on a retry path reads as "my write failed" when in fact
+   *  it was never attempted — cheaper and clearer to reject it here. */
+  private idemHeader(key?: string): Record<string, string> | undefined {
+    // `null` is "no key" too: RegExp.test would stringify it into the literal key
+    // "null", and every write sharing it would replay the first.
+    if (key === undefined || key === null) return undefined;
+    if (!IDEMPOTENCY_KEY_RE.test(key)) {
+      throw new Error(
+        `invalid idempotencyKey: ${JSON.stringify(key)} — 1-128 chars of [A-Za-z0-9._:-]`,
+      );
+    }
+    return { "Idempotency-Key": key };
+  }
+
+  /** Milliseconds to sleep before retry `attempt` (0-based): exponential with jitter,
+   *  or what a valid `Retry-After` asks for. */
+  private backoffMs(attempt: number, retryAfter?: string | null): number {
+    const ra = retryAfterMs(retryAfter ?? null);
+    if (ra !== undefined) return ra;
+    return Math.min(8_000, 500 * 2 ** attempt) + Math.random() * 250;
+  }
+
+  /** Read the body with a hard size cap, so a broken/hostile endpoint can't
+   * make the process buffer gigabytes. With `withinMs`, a body still arriving after
+   * that long is dropped and the read fails. */
+  private async readCappedBytes(res: Response, withinMs?: number): Promise<Uint8Array> {
+    const cl = res.headers.get("content-length");
+    if (cl && Number(cl) > MAX_RESPONSE_BYTES) {
+      discard(res);
+      throw new WosError(res.status, `response too large (${cl} bytes) — refusing to buffer it`);
+    }
+    const slow = () => new SlowBody(`not received within ${withinMs}ms`);
+    // With `withinMs`, every wait below races `stopped`, which rejects once it has passed.
+    let late = false;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let stop = () => {};
+    const stopped = new Promise<never>((_, reject) => (stop = () => reject(slow())));
+    stopped.catch(() => {});
+    const timer =
+      withinMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            late = true;
+            stop();
+            reader?.cancel().catch(() => {});
+          }, withinMs);
+    const within = <T>(p: Promise<T>): Promise<T> => (timer === undefined ? p : Promise.race([p, stopped]));
+    try {
+      if (!res.body) {
+        // A body-less Response (test doubles, polyfills, wrappers that rebuild the
+        // Response) has only `arrayBuffer()`, which has no ceiling of its own.
+        const buf = new Uint8Array(await within(res.arrayBuffer()));
+        if (buf.byteLength > MAX_RESPONSE_BYTES) {
+          throw new WosError(res.status, `response too large (${buf.byteLength} bytes) — refusing it`);
+        }
+        return buf;
+      }
+      reader = res.body.getReader();
+      const parts: Uint8Array[] = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await within(reader.read());
+        // The cancel above ends a pending read with `done`; that is not the real end.
+        if (late) throw slow();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_RESPONSE_BYTES) {
+          reader.cancel().catch(() => {});
+          throw new WosError(res.status, "response too large — refusing to buffer it");
+        }
+        parts.push(value);
+      }
+      const buf = new Uint8Array(size);
+      let off = 0;
+      for (const p of parts) {
+        buf.set(p, off);
+        off += p.byteLength;
+      }
+      return buf;
+    } catch (e) {
+      throw late && !(e instanceof SlowBody) ? slow() : e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async request(
+    method: string,
+    path: string,
+    body?: unknown,
+    idempotencyKey?: string,
+    removes = false,
+  ): Promise<any> {
+    const extraHeaders = this.idemHeader(idempotencyKey);
+    // Serialized ONCE, before any attempt. A value JSON cannot carry (an ORM entity, a
+    // BigInt, a circular reference) is an argument mistake: a plain Error, not a
+    // status-0 APIConnectionError that a caller would retry.
+    let payload: string | undefined;
+    try {
+      payload = body === undefined ? undefined : JSON.stringify(body);
+    } catch (e) {
+      throw new Error(
+        `request body could not be serialized: ${e instanceof Error ? e.message : String(e)}. ` +
+          "Pass plain JSON values — an ORM entity, a BigInt or a circular reference cannot be sent.",
+      );
+    }
+    const { res, body: buf } = await this.send(method, path, payload, extraHeaders, removes);
+    const text = new TextDecoder().decode(buf);
+    // An empty body is only legal when the STATUS says there is no body. Accepting
+    // any empty 2xx would make an `add()` answered by a truncating proxy return `{}`,
+    // which reads as a successful write with no id.
+    if (!text) {
+      if (NO_BODY_STATUS.has(res.status)) return {};
+      throw new WosError(res.status, "empty response body — expected a JSON object");
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch (e: any) {
+      // A 2xx with a corrupt body is a real failure — surface it, don't leak
+      // a raw SyntaxError.
+      throw new WosError(res.status, `invalid JSON in response: ${cleanServerText(String(e?.message ?? e), 512)}`);
+    }
+    // Enforce a JSON OBJECT: every method reads the result with `.field`, so a
+    // body that parses to null / a number / a string / an array (a broken or
+    // hostile server) must be a clean WosError, not a `null.memories` TypeError.
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      const got = data === null ? "null" : Array.isArray(data) ? "array" : typeof data;
+      throw new WosError(res.status, `expected a JSON object in the response, got ${got}`);
+    }
+    // Surface whether the write was stored or replayed. The server says so with
+    // `Idempotent-Replayed: true`, and it answers the question someone using an
+    // idempotency key is asking: did my retry write, or is this the first response
+    // coming back again? Only when the body does not already carry the field: what
+    // the service said wins.
+    if (res.headers.get("Idempotent-Replayed") === "true" && !("replayed" in data)) {
+      (data as Record<string, unknown>).replayed = true;
+    }
+    return data;
   }
 }
 

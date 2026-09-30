@@ -1,6 +1,6 @@
 {
   "name": "wontopos",
-  "version": "2.2.40",
+  "version": "2.2.41",
   "description": "Wontopos \u2014 long-term memory for AI agents. Identical recall in every language, ~100\u00d7 lower LLM bill.",
   "keywords": [
     "memory",

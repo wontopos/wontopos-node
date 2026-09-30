@@ -1,12 +1,5 @@
-// `require("wontopos")` did not work — and not in a degraded way. "type": "module"
-// with no `require` condition in `exports` means Node's CJS resolver cannot resolve
-// this package at all, so a LangChain integration or an in-house codebase that has
-// not moved to ESM simply cannot install it. This file is written in CJS on purpose:
-// an ESM test importing the CJS build would prove nothing about the resolver.
-//
-// `require("wontopos")` from inside the package is a self-reference — Node resolves
-// it through this package's own `exports` map, which is exactly the map a consumer
-// hits. Requiring dist/cjs/wontopos.js by path would test the file and skip the map.
+// CommonJS on purpose: `require("wontopos")` here is a self-reference that Node resolves
+// through this package's `exports` map, the same map a consumer hits.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
@@ -39,12 +32,9 @@ test("both builds carry the same public surface", () => {
   });
 });
 
-// The TYPES half of the same story. `require("wontopos")` resolved and ran, but a
-// TypeScript CJS consumer on node16/nodenext resolution still could not use it: the
-// exports map carried ONE top-level "types" pointing at dist/wontopos.d.ts, and under
-// "type": "module" that file is an ESM declaration — TS1479, "cannot be imported with
-// require". Runtime worked, so the existing test above said nothing. The require
-// condition now names its own .d.cts.
+// The types half. Under "type": "module", dist/wontopos.d.ts is an ESM declaration, so a
+// TypeScript CJS consumer on node16/nodenext resolution needs the require condition to
+// name its own .d.cts (TS1479 otherwise).
 test("the require condition ships a CommonJS declaration file", () => {
   // Through the exports map, which is also what a bundler does — a map that omits
   // "./package.json" makes this ERR_PACKAGE_PATH_NOT_EXPORTED.

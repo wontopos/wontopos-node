@@ -1,10 +1,4 @@
-// Runs from `prepublishOnly`, and exists so the package manifest does not name it.
-//
-// The gate invocation used to sit inline in package.json. npm publishes package.json
-// in full, `scripts` included, so the registry page for this package would have shown
-// the sibling checkout's directory name and the scanner's filename — which is an
-// advertisement that a leak screen exists over a closed surface, and a hint at what it
-// screens for. This file is not in `files`, so it stays here.
+// Runs from `prepublishOnly`.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
