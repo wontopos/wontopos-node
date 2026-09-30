@@ -2102,6 +2102,18 @@ test("a retry that drops with no time to back off reports the answer before it",
   }
 });
 
+test("a search, a POST that only reads, reports the answer its cut-short retry followed", async () => {
+  const { RateLimitError } = await import(DIST);
+  const { seen, close, base } = await answerOnceThenHang([429, { "Retry-After": "1" }, errBody("rate_limit_error", "slow down")]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, deadlineMs: 1500 });
+    await assert.rejects(mem.search("q", "alice"), (e) => e instanceof RateLimitError && e.status === 429);
+    assert.equal(seen.length, 2);
+  } finally {
+    close();
+  }
+});
+
 test("a write whose retry the deadline cuts short stays a status-0 deadline error", async () => {
   // The retry was sent and may have been applied: the 429 before it no longer says
   // what happened to the write.

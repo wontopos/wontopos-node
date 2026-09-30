@@ -15,11 +15,10 @@
  * so with no `userId` anywhere the zero-setup path just works.
  *
  * The API key picks *which memory* (your account); `model` picks *which engine*
- * reads it. `listModels()` reports each model's `memory` as `"shared"` or
- * `"isolated"`, and an isolated one starts empty. Every model on the shared pool
- * lists, fetches and deletes the same memories, but a search may not find memories
- * stored through a different model; store and search with the same one. Set a
- * default in the constructor, or override a single call with
+ * reads it. Models on the shared pool read the same memory, so you can store with
+ * one and recall with another; `listModels()` reports each model's `memory` as
+ * `"shared"` or `"isolated"`, and an isolated one starts empty. Set a default in
+ * the constructor, or override a single call with
  * `mem.withModel("tablet-1").recall(...)`.
  *
  * Recall quality does not depend on which language a memory was written in: a
@@ -43,7 +42,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.41";
+const VERSION = "2.2.42";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -81,6 +80,22 @@ const MAX_TIMER_MS = 2_147_483_647;
  *  happened further along. */
 const RETRY_IF_IDEMPOTENT = new Set([408, 502, 503, 504]);
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]);
+/** POST routes that only read. When the deadline cuts short a retry of one, the answer
+ *  before it still describes the call, as for an idempotent method. */
+const READ_POSTS = new Set([
+  "/api/v1/memory/search",
+  "/api/v1/memory/recall",
+  "/api/v1/memory/get",
+  "/api/v1/memory/list",
+  "/api/v1/memory/stats",
+  "/api/v1/memory/history",
+  "/api/v1/memory/lineage",
+  "/api/v1/memory/by-speaker",
+  "/api/v1/memory/images",
+  "/api/v1/memory/image",
+  "/api/v1/engram/run",
+  "/api/v1/won/revisions",
+]);
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
 /** Refuse to buffer absurd responses (real ones are a few KB) — protects the
  * process if a custom baseUrl points somewhere broken or hostile. */
@@ -1058,9 +1073,7 @@ export interface ModelInfo {
   id: string;
   name: string;
   available: boolean;
-  /** "shared" — lists, fetches and deletes the common memory pool, though a search
-   *  may not find memories stored through a different model; "isolated" — its own
-   *  dedicated store. */
+  /** "shared" — reads the common memory pool; "isolated" — its own dedicated store. */
   memory: "shared" | "isolated";
   /** What this model can do. Check it before relying on a feature. */
   capabilities?: ModelCapabilities;
@@ -2494,9 +2507,9 @@ export class Client {
    * dropped connections on idempotent methods; connect failures on every method. A
    * retry whose wait is over the cap, or does not fit the deadline, is not made: the
    * call fails with the error of the response it has. So does a retry the deadline
-   * leaves no time to send, and the retry of an idempotent method or `getImage` that
-   * the deadline cuts short. Any other retry cut short stays a status-0 deadline error:
-   * a write may have been applied.
+   * leaves no time to send, and the retry of an idempotent method or of a POST that
+   * only reads that the deadline cuts short. Any other retry cut short stays a status-0
+   * deadline error: a write may have been applied.
    */
   private async send(
     method: string,
@@ -2549,7 +2562,9 @@ export class Client {
        *  before it; a write reports the deadline, since it may have been applied. */
       const cutShort = (): WosError => {
         const why = att.why();
-        if (why === "deadline" && (idempotent || reads) && previous) return previous;
+        if (why === "deadline" && (idempotent || reads || (upper === "POST" && READ_POSTS.has(logPath))) && previous) {
+          return previous;
+        }
         return new APIConnectionError(0, this.abortMessage(why));
       };
       let res: Response;
