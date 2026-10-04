@@ -42,7 +42,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.42";
+const VERSION = "2.2.43";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -770,13 +770,16 @@ export interface Memory {
   [key: string]: unknown;
 }
 
-/** `add` / `store` → `{ id, status }` (`status: "stored" | "stored (async)" | "duplicate"`). */
+/** `add` / `store` → `{ id, status }`. `status` starts with `"stored"` (more text can
+ *  follow) or is `"duplicate"`; match on the prefix. */
 export interface StoreResult {
   id?: string;
-  /** `"stored"`, or `"duplicate"` when nothing was saved. */
+  /** Starts with `"stored"`, or is `"duplicate"` when nothing was saved. */
   status?: string;
   /**
-   * Present when `status` is `"duplicate"`: the id of the memory this write collided with.
+   * On a duplicate, the id of the memory this write collided with, when the reply has
+   * it. A duplicate can arrive with an empty `id` and no `duplicate_of`; then search with
+   * the same text to find the memory it matched.
    *
    * A genuinely new fact that only varies a detail of one already stored ("no meetings
    * before 10am" next to "no meetings on Fridays") can land here too, so a duplicate is
@@ -949,6 +952,8 @@ export interface SpeakerPage {
   memories: Memory[];
   chunks?: number;
   /** The count to show before anyone confirms a delete of this speaker's memories. */
+  records_to_delete?: number;
+  /** @deprecated The same number as `records_to_delete`, under its old name. */
   points_to_delete?: number;
   returned?: number;
   has_more?: boolean;
@@ -1002,10 +1007,16 @@ export interface EngramResult {
   [key: string]: unknown;
 }
 
+/** One turn of the short-term window, as `history()` returns it. */
 export interface HistoryTurn {
-  user_msg?: string;
-  assistant_msg?: string;
+  /** `"user"` or `"assistant"`. */
+  role?: string;
+  content?: string;
   timestamp?: string;
+  /** @deprecated Not sent: a turn comes back as `role` and `content`. */
+  user_msg?: string;
+  /** @deprecated Not sent: a turn comes back as `role` and `content`. */
+  assistant_msg?: string;
   [key: string]: unknown;
 }
 
@@ -1016,7 +1027,7 @@ export interface UsageResult {
   key?: { requests?: number; cost_cents?: number; input_tokens?: number; output_tokens?: number; since?: string };
   /** The workspace this key belongs to, over the window. */
   workspace?: { workspace_id?: string | null; requests?: number; cost_cents?: number };
-  /** Per-store spend over the window, busiest first, and at most 50 rows — a longer
+  /** Per-store spend over the window, highest spend first, and at most 50 rows — a longer
    *  list is cut, so these need not sum to `workspace`. `other`, when present, is an
    *  overflow bucket rather than a store. */
   stores?: { store?: string; requests?: number; cost_cents?: number }[];
@@ -1077,6 +1088,10 @@ export interface ModelInfo {
   memory: "shared" | "isolated";
   /** What this model can do. Check it before relying on a feature. */
   capabilities?: ModelCapabilities;
+  /** Present on a live model that is scheduled to retire (RFC3339). From that instant
+   *  the model leaves this list and calls naming it are refused. */
+  retires_at?: string;
+  [key: string]: unknown;
 }
 
 /** One entry of the engram / delivery-form catalogue (`listEngrams`). */
@@ -1955,9 +1970,9 @@ export class Client {
   }
   /** List a store's stored memories — the text you stored, plus its metadata.
    * Paginated: pass the returned `next_cursor` back as `cursor` for the next
-   * page, and only a cursor the service returned. A `null` cursor means there is no
-   * next page; a non-null one can still be followed by an empty page. Use it to
-   * browse or export a store.
+   * page, and only a cursor the service returned, with the model that returned it. A
+   * `null` cursor means there is no next page; a non-null one can still be followed by
+   * an empty page. Use it to browse or export a store.
    *
    * `limit` is 1-500 (default 100); anything else is refused before the request.
    *
@@ -2213,8 +2228,8 @@ export class Client {
    * assistant's own words, otherwise a person's name. Same cursor paging as
    * `listImages`; `limit` is 5-20.
    *
-   * `points_to_delete` is the count to show before anyone confirms a delete of this
-   * speaker's memories.
+   * `records_to_delete` is the count to show before anyone confirms a delete of this
+   * speaker's memories; `points_to_delete` is the same number under its old name.
    */
   async bySpeaker(
     speaker: string,
@@ -2241,7 +2256,8 @@ export class Client {
   }
 
   // ----- models -----
-  /** Available models: `[{ id, name, available, memory }, ...]`. Needs no API key. */
+  /** Available models: `[{ id, name, available, memory, capabilities, retires_at? }, ...]`.
+   *  Needs no API key. */
   async listModels(): Promise<ModelInfo[]> {
     const data = await this.request("GET", "/api/v1/models");
     return asRecords<ModelInfo>(data.models);
