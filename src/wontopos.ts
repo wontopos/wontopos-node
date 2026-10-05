@@ -42,7 +42,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.43";
+const VERSION = "2.2.44";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -688,6 +688,10 @@ export class ConflictError extends WosError {
     this.conflictsWith = typeof c === "string" ? c : undefined;
   }
 }
+/** 410 — the model this call named is retired. Retrying cannot succeed: name a live
+ *  model instead (`listModels()` lists them). `deleteStore` still works under a
+ *  retired model. */
+export class GoneError extends WosError {}
 /** 429 — too many requests. Back off and retry (the client already retries these,
  *  unless `Retry-After` asks for more than 30 seconds). */
 export class RateLimitError extends WosError {
@@ -711,6 +715,8 @@ export class RateLimitError extends WosError {
  */
 export class ServerError extends WosError {}
 
+const GONE_HINT = "This model is retired; listModels() lists the ones you can use.";
+
 const STATUS_ERRORS: Record<number, new (s: number, m: string, r?: string, i?: WosErrorInit) => WosError> = {
   400: BadRequestError,
   401: AuthenticationError,
@@ -718,6 +724,7 @@ const STATUS_ERRORS: Record<number, new (s: number, m: string, r?: string, i?: W
   403: PermissionDeniedError,
   404: NotFoundError,
   409: ConflictError,
+  410: GoneError,
   413: BadRequestError,
   422: BadRequestError,
   429: RateLimitError,
@@ -2500,6 +2507,7 @@ export class Client {
   ): WosError {
     const e = parseErrorText(new TextDecoder().decode(body));
     let msg = cleanServerText(e.message) || `HTTP ${res.status}`;
+    if (res.status === 410) msg += ` ${GONE_HINT}`;
     if (unread) msg += ` (the error body could not be read: ${cleanServerText(unread, 512)})`;
     const requestId = e.requestId === undefined ? undefined : cleanServerText(e.requestId, 256) || undefined;
     const err = errorFor(res.status, msg, requestId, {

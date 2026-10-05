@@ -180,6 +180,10 @@ try {
 }
 ```
 
+A retired model answers `410`, thrown as `GoneError`: retrying cannot succeed, so name a
+live model (`listModels()` lists them, with `retires_at` on one that is scheduled to
+retire). `deleteStore` still works under a retired model.
+
 ## A different API host
 
 Point the client somewhere other than the default endpoint - a dedicated region,

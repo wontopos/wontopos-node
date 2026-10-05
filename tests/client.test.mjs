@@ -1207,6 +1207,25 @@ test("whether an idempotent write was replayed shows up in the result", async ()
   }
 });
 
+test("410 is a GoneError, says what to do, and is not retried", async () => {
+  const { GoneError } = await import("../dist/wontopos.js");
+  const body = JSON.stringify({ type: "error", error: { type: "gone_error", message: "Scroll 1 now exists only in memory.", code: 0, request_id: "req_410" } });
+  const { server, seen, base } = await scriptedServer([[410, {}, body], [410, {}, body], [410, {}, body]]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 3 });
+    const e = await mem.search("q", "alice").then(() => null, (err) => err);
+    assert.ok(e instanceof GoneError, `got ${e}`);
+    assert.ok(e instanceof WosError);
+    assert.equal(e.status, 410);
+    assert.equal(e.type, "gone_error");
+    assert.match(e.message, /Scroll 1 now exists only in memory\./);
+    assert.match(e.message, /listModels\(\)/);
+    assert.equal(seen.length, 1, "retrying a retired model can never succeed");
+  } finally {
+    server.close();
+  }
+});
+
 test("501 is not retried (pinned by behaviour, not by wording)", async () => {
   const { server, seen, base } = await scriptedServer([
     [501, {}, '{"type":"error","error":{"type":"api_error","message":"no endpoint"}}'],
