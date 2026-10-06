@@ -5,7 +5,7 @@ npm install wontopos
 ```
 
 Get an API key in the [console](https://wontopos.com). Keys look like `wos-live-...`;
-the client also reads `WONTOPOS_API_KEY` from the environment.
+`Client.fromEnv()` reads `WONTOPOS_API_KEY` from the environment instead.
 
 ```ts
 import { Client } from "wontopos";
@@ -35,10 +35,10 @@ Where the store id goes depends on whether the method takes a payload. A method 
 writes or searches puts the payload first and the store second — `mem.add("...", "alice")`,
 `mem.search("...", "alice")`. A method that only addresses a store takes it first —
 `mem.listMemories("alice")`, `mem.stats("alice")`, `mem.delete("alice", memoryId)`.
-Most of them let you leave it out for the client's default store. Four take it
-positionally and cannot — `get`, `delete`, `lineage` and `forgetImage` want an explicit
-`undefined` there, because a second required argument follows it. Python omits it in
-all four; this is the one place the three clients differ in shape rather than meaning.
+Most of them let you leave it out for the client's default store. Five take it
+positionally and cannot — `get`, `getImage`, `delete`, `lineage` and `forgetImage` want
+an explicit `undefined` there, because a second required argument follows it. Python
+omits it in all five; this is the one place the three clients differ in shape rather than meaning.
 Let your editor confirm the order: every signature is typed. A store is one isolated memory space per end-user, agent, or topic. WHO said each memory inside a store is the `speaker` tag below — storing the assistant's own words never needs a separate id.
 
 ## Who said it (speakers)
@@ -112,6 +112,7 @@ This one needs `npm i undici` — Node's global `fetch` is built on undici, but 
 package itself is not installed for you.
 
 ```ts
+import { Client } from "wontopos";
 import { ProxyAgent } from "undici";
 
 const agent = new ProxyAgent(process.env.HTTPS_PROXY!);
@@ -147,7 +148,7 @@ Every method returns a documented shape — `StoreResult`, `UpdateResult`,
 `RecallResult`, `EngramResult`, `StatsResult`, `SpeakersList`, `Memory[]`, ... —
 each with an index signature, so new server fields flow through without an SDK
 update. `search` options are typed too (`SearchOptions`: `cache_control`,
-`speaker`, plus pass-through).
+`speaker`, plus `extra` for pass-through).
 
 ```ts
 import { type Memory } from "wontopos";
@@ -206,14 +207,14 @@ Found something wrong, or something that looks unsafe? Tell us — every report 
 - Security: <https://wontopos.com/contact?topic=security> (also published at
   [`/.well-known/security.txt`](https://wontopos.com/.well-known/security.txt))
 
-Include the SDK version (`the version in package.json`) and the language. If it involves a store id or a
+Include the SDK version (the one in package.json) and the language. If it involves a store id or a
 memory, describe the shape rather than pasting the contents — we do not need your
 data to fix it.
 
 ## Changelog
 
 The three clients release in lockstep — same version, same surface, same day. Patch
-releases are additive. Eight inside 2.2 were not, deliberately and each with its
+releases are additive. Nine inside 2.2 were not, deliberately and each with its
 reason; the changelog lists them.
 
 See [CHANGELOG.md](https://github.com/wontopos/wontopos-node/blob/main/CHANGELOG.md).

@@ -1226,6 +1226,63 @@ test("410 is a GoneError, says what to do, and is not retried", async () => {
   }
 });
 
+test("revisions refuses an include other than revised or unrevised before sending", async () => {
+  const { server, seen, base } = await scriptedServer([]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await assert.rejects(mem.revisions("alice", { include: "both" }), /include must be "revised" or "unrevised"/);
+    assert.equal(seen.length, 0, "nothing may reach the network");
+  } finally {
+    server.close();
+  }
+});
+
+test("revisions leaves a null include out of the request", async () => {
+  const { server, seen, base } = await scriptedServer([[200, {}, '{"revised":0,"unrevised":0,"total":0}']]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.revisions("alice", { include: null });
+    assert.equal(seen.length, 1);
+    assert.equal("include" in JSON.parse(seen[0].body), false, `sent ${seen[0].body}`);
+  } finally {
+    server.close();
+  }
+});
+
+test("a write option the client does not know is warned about, not dropped silently", async () => {
+  const { server, seen, base } = await scriptedServer([[200, {}, '{"id":"m1","status":"stored"}'], [200, {}, '{"id":"m2","status":"stored"}'], [200, {}, '{"status":"stored"}']]);
+  const warn = console.warn;
+  const warned = [];
+  console.warn = (m) => warned.push(String(m));
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.add("x", "alice", {}, { idempotency_key: "job-7" });
+    await mem.add("y", "alice", {}, { idempotencyKey: "job-8" });
+    assert.equal(seen[0].headers["idempotency-key"], undefined, "only idempotencyKey is the option");
+    assert.equal(seen[1].headers["idempotency-key"], "job-8");
+    assert.ok(warned.some((m) => m.includes('"idempotency_key"')), `warnings: ${warned}`);
+    await mem.addBulk("blob", "alice", null, undefined, { image: { data: "aGk=" } });
+    assert.equal(JSON.parse(seen[2].body).category, "general", "a null category goes as general");
+    assert.ok(warned.some((m) => m.includes('"image"') && m.includes("idempotencyKey only")), `warnings: ${warned}`);
+  } finally {
+    console.warn = warn;
+    server.close();
+  }
+});
+
+test("a search option of null is left out, as Python leaves out None", async () => {
+  const { server, seen, base } = await scriptedServer([[200, {}, '{"memories":[]}']]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.search("q", "alice", 10, { speaker: null, cache_control: null });
+    const body = JSON.parse(seen[0].body);
+    assert.equal("speaker" in body, false);
+    assert.equal("cache_control" in body, false);
+  } finally {
+    server.close();
+  }
+});
+
 test("501 is not retried (pinned by behaviour, not by wording)", async () => {
   const { server, seen, base } = await scriptedServer([
     [501, {}, '{"type":"error","error":{"type":"api_error","message":"no endpoint"}}'],
@@ -3126,6 +3183,8 @@ test("page sizes outside the service's range are refused before the wire", async
       await assert.rejects(() => mem.search("q", "alice", 10, { max_images: bad }), /max_images/);
       await assert.rejects(() => mem.searchFull("q", "alice", 10, { max_images: bad }), /max_images/);
       await assert.rejects(() => mem.search("q", "alice", 10, { extra: { max_images: bad } }), /max_images/);
+      const nul = { max_images: null, extra: { max_images: bad } };
+      await assert.rejects(() => mem.search("q", "alice", 10, nul), /max_images/);
     }
     for (const bad of [0, -1, 1e9, NaN, Infinity, 2.5, true, 501]) {
       await assert.rejects(() => mem.listMemories("alice", { limit: bad }), /between 1 and 500/, `limit ${bad}`);

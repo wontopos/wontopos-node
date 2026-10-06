@@ -42,7 +42,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.44";
+const VERSION = "2.2.45";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -1226,9 +1226,9 @@ const KNOWN_ENGRAM_KEYS = new Set(["form", "tz"]);
  */
 function checkSearchOpts(opts: object): void {
   checkOpts(opts, KNOWN_SEARCH_KEYS, "search");
-  // The value that is sent: the typed field, else one in `extra`.
+  // The value that is sent: the typed field, else one in `extra`. A null field is not given.
   const o = opts as SearchOptions;
-  optRange(o.max_images !== undefined ? o.max_images : o.extra?.max_images, "max_images", 0, MAX_IMAGES_MAX);
+  optRange(o.max_images != null ? o.max_images : o.extra?.max_images, "max_images", 0, MAX_IMAGES_MAX);
 }
 
 /** The same check for any option bag: `contextLimit: 0`, the camelCase typo of
@@ -1293,6 +1293,27 @@ function warnOnceUnknownKeys(
     }
     console.warn(message(k));
   }
+}
+
+/** Search options without their nulls: null is "not given", as Python's None is, and a
+ *  null speaker or cache_control is a 400. `extra` is sent as given. */
+function givenOpts(known: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(known).filter(([, v]) => v !== null));
+}
+
+const ADD_KEYS = new Set(["idempotencyKey", "image"]);
+const WRITE_KEYS = new Set(["idempotencyKey"]);
+const warnedWriteKeys = new Set<string>();
+
+/** The idempotency key of a write. An option this method does not take is warned about
+ *  once: `idempotency_key` (Python's spelling) dropped without a word let a re-run job
+ *  write the same memory twice. Only `add` takes `image`. */
+function writeKey(opts: WriteOptions, takesImage = false): string | undefined {
+  warnOnceUnknownKeys(opts, takesImage ? ADD_KEYS : WRITE_KEYS, warnedWriteKeys, (k) =>
+    `wontopos: write option ${JSON.stringify(k)} is not sent. ` +
+    (takesImage ? "add takes idempotencyKey and image." : "This call takes idempotencyKey only."),
+  );
+  return opts.idempotencyKey;
 }
 
 function warnOnUnknownFilters(filters: unknown): void {
@@ -1397,9 +1418,10 @@ export interface SearchOptions {
 export interface WriteOptions {
   idempotencyKey?: string;
   /**
-   * An image to store alongside the text. Needs a model that lists `images` in its
-   * `listModels()` capabilities; any other refuses the write rather than store the
-   * caption and quietly drop the image.
+   * An image to store alongside the text, read by `add` (and `store`) only: `addTurn`,
+   * `addBulk` and `update` warn about it and do not send it. Needs a model that lists
+   * `images` in its `listModels()` capabilities; any other refuses the write rather than
+   * store the caption and quietly drop the image.
    *
    * A caption is required: the service refuses empty `content` (400) even with an
    * image attached.
@@ -1779,7 +1801,7 @@ export class Client {
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, metadata };
     if (opts.image !== undefined) body.image = normalizeImage(opts.image);
     warnOnUnknownMetadata(metadata);
-    return this.post("/api/v1/memory/store", body, opts.idempotencyKey);
+    return this.post("/api/v1/memory/store", body, writeKey(opts, true));
   }
   /** Alias of `add` — store one memory. */
   async store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
@@ -1790,7 +1812,7 @@ export class Client {
     return this.post(
       "/api/v1/memory/store-turn",
       { user_id: this.uid(userId), user_msg: userMsg, assistant_msg: assistantMsg },
-      opts.idempotencyKey,
+      writeKey(opts),
     );
   }
   /** Bulk-ingest a large blob of text in one call. For backfilling.
@@ -1799,16 +1821,17 @@ export class Client {
    *  The call most worth an `opts.idempotencyKey`: a backfill that dies halfway and is
    *  re-run would otherwise ingest the whole blob a second time. */
   async addBulk(content: string, userId?: string, category = "general", timestamp?: string, opts: WriteOptions = {}): Promise<StatusResult> {
-    const body: Record<string, unknown> = { user_id: this.uid(userId), content, category };
+    // A null category is "not given", as Python's None is: it goes as "general".
+    const body: Record<string, unknown> = { user_id: this.uid(userId), content, category: category ?? "general" };
     if (timestamp) body.timestamp = timestamp;
-    return this.post("/api/v1/memory/bulk-store", body, opts.idempotencyKey);
+    return this.post("/api/v1/memory/bulk-store", body, writeKey(opts));
   }
   /** Supersede an old memory with new content. Payload first, userId last — same shape as add/search. */
   async update(oldMemoryId: string, newContent: string, userId?: string, opts: WriteOptions = {}): Promise<UpdateResult> {
     return this.post(
       "/api/v1/memory/supersede",
       { user_id: this.uid(userId), old_memory_id: oldMemoryId, new_content: newContent },
-      opts.idempotencyKey,
+      writeKey(opts),
     );
   }
 
@@ -1835,7 +1858,7 @@ export class Client {
     limit ??= 10; // `null`, like `undefined`, means the default
     checkCount(limit, "limit");
     const { extra, ...known } = opts;
-    const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
+    const r = await this.post("/api/v1/memory/search", { ...extra, ...givenOpts(known), user_id: this.uid(userId), query, max_results: limit });
     return mergeResults(r);
   }
   /** Search, with the assistant's own words kept apart: both fields from ONE call.
@@ -1851,7 +1874,7 @@ export class Client {
     limit ??= 10;
     checkCount(limit, "limit");
     const { extra, ...known } = opts;
-    const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
+    const r = await this.post("/api/v1/memory/search", { ...extra, ...givenOpts(known), user_id: this.uid(userId), query, max_results: limit });
     return { memories: asRecords<Memory>(r.memories), self_memories: asRecords<Memory>(r.self_memories) };
   }
   /**
@@ -1875,7 +1898,7 @@ export class Client {
     limit ??= 10;
     checkCount(limit, "limit");
     const { extra, ...known } = opts;
-    const r = await this.post("/api/v1/memory/search", { ...extra, ...known, user_id: this.uid(userId), query, max_results: limit });
+    const r = await this.post("/api/v1/memory/search", { ...extra, ...givenOpts(known), user_id: this.uid(userId), query, max_results: limit });
     // Spread first so a field added later still arrives; the known ones are then
     // normalized, because a broken proxy can null any of them.
     return {
@@ -2202,9 +2225,14 @@ export class Client {
       skipIds?: string[];
     } = {},
   ): Promise<RevisionsResult> {
+    const inc: unknown = opts.include;
+    if (inc !== undefined && inc !== null && inc !== "revised" && inc !== "unrevised") {
+      // The service's 400 for this names no field, so it is refused here.
+      throw new Error(`include must be "revised" or "unrevised", got ${JSON.stringify(inc)}.`);
+    }
     const limit = optRange(opts.limit, "limit", PAGE_LIMIT_MIN, PAGE_LIMIT_MAX);
     const body: Record<string, unknown> = {};
-    if (opts.include !== undefined) body.include = opts.include;
+    if (opts.include != null) body.include = opts.include;
     if (limit !== undefined) body.limit = limit;
     if (opts.before !== undefined) body.before = opts.before;
     if (opts.skipIds !== undefined) body.skip_ids = opts.skipIds;
