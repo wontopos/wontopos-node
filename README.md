@@ -24,8 +24,8 @@ const ctx = await mem.recall("what does alice drink?", "alice");
 ## Why
 
 - **The same in every language** — identical recall whichever language a memory was written in (Korean · Japanese · Chinese · English).
-- **No LLM in the loop** — `store` / `search` / `recall` never call a language model. You pay retrieval, not generation.
-- **Bounded retrieval** — `recall()` returns a small, fixed-size slice regardless of how much you've stored (~1,000 tokens on `tablet-2`, the default engine).
+- **No LLM reads your memories** — no language model reads your stored memories, on any model. You pay retrieval, not generation.
+- **Bounded retrieval** — `recall()` returns the recent turns, at most `limit` long-term memories (default 10, up to 20) and at most `context_limit` rows of the surrounding conversation (default 10, up to 20), however much you've stored.
 
 ## Methods
 
@@ -38,7 +38,7 @@ writes or searches puts the payload first and the store second — `mem.add("...
 Most of them let you leave it out for the client's default store. Five take it
 positionally and cannot — `get`, `getImage`, `delete`, `lineage` and `forgetImage` want
 an explicit `undefined` there, because a second required argument follows it. Python
-omits it in all five; this is the one place the three clients differ in shape rather than meaning.
+omits it in all five, and Rust takes it positionally (`None` for the default store, where there is one).
 Let your editor confirm the order: every signature is typed. A store is one isolated memory space per end-user, agent, or topic. WHO said each memory inside a store is the `speaker` tag below — storing the assistant's own words never needs a separate id.
 
 ## Who said it (speakers)
@@ -56,19 +56,22 @@ await mem.search("what did Bob say about deadlines?", "alice", 10, { speaker: "B
 ```
 
 `listSpeakers()` shows the registered people with per-person memory counts;
-`removeSpeaker()` unregisters (memories stay, the tag goes). A store registers
+`removeSpeaker()` unregisters (memories stay; the tag goes, except on `tablet-2`, which keeps it on memories already stored). A store registers
 up to 50 people to start (a limit we plan to raise); `"me"` never needs
 registration and never counts against it.
 
 ## Recall caching
 
-Opt in per search and repeated or extended queries reuse the previous result
-at 10% of the normal rate (Tablet and Scroll models).
+Opt in per search and a repeated query reuses the previous result at 10% of the
+normal rate; an extended one reuses part of it (Tablet and Scroll models).
 
 It is not free to turn on: the FIRST call writes the cache and bills the query
-tokens at 2x for a `5m` TTL, 3x for `1h`. Only hits inside the TTL bill at 0.1x.
-So it pays for a query you repeat or extend, and costs more for one you issue
-once — do not switch it on globally. Any write to the store invalidates its cache
+tokens at 2x for a `5m` TTL, 3x for `1h`. The same query again inside the TTL bills
+its query and its results at 0.1x. A query that extends the cached one (its text plus
+more) bills the cached part at 0.1x, the new part at the write rate and its results
+at the normal rate. A store keeps one cached query per model and set of options, so a
+different query replaces it. So it pays for a query you repeat or extend, and costs
+more for one you issue once — do not switch it on globally. Any write to the store invalidates its cache
 at once, so a hit can never predate a new memory.
 
 ```ts
@@ -82,11 +85,11 @@ Built in, no configuration needed:
 
 - **Automatic retries** — 429 and a 409 for a write already in flight always, and 408 /
   502 / 503 / 504 or a connection error only when a retry cannot double-process a write.
-  The writes and the searches are POSTs, and any of those four may have been returned
-  *after* the write already landed, so those get 429, that 409 and connect-level
-  failures only. The GET and DELETE calls — `ping`, `listStores`, `listSpeakers`,
-  `listModels`, `listEngrams`, `usage`, `deleteStore`, `removeSpeaker`, `forgetImage` —
-  retry all four. Twice, with exponential backoff + jitter, honoring the server's
+  A write may already have landed when any of those four comes back, so a POST write gets
+  429, that 409 and connect-level failures only. The calls that are safe to send again
+  retry all four: the reads sent as POST (`search`, `recall`, `get`, `listMemories`,
+  `stats`, ...) and the GET and DELETE calls (`ping`, `listStores`, `listSpeakers`,
+  `listModels`, `listEngrams`, `usage`, `deleteStore`, `removeSpeaker`, `forgetImage`). Twice, with exponential backoff + jitter, honoring the server's
   `Retry-After` up to 30s. Tune with `new Client({ maxRetries })`; `0` disables.
 - **Redirects refused** — the API key never follows a 3xx to another host.
 - **Timeouts** — 30s per attempt by default (`timeoutMs`), and a total budget for
@@ -147,7 +150,8 @@ Built in, none of it configurable off:
 Every method returns a documented shape — `StoreResult`, `UpdateResult`,
 `RecallResult`, `EngramResult`, `StatsResult`, `SpeakersList`, `Memory[]`, ... —
 each with an index signature, so new server fields flow through without an SDK
-update. `search` options are typed too (`SearchOptions`: `cache_control`,
+update. `searchSelf`'s result and `getImage`'s bytes are built by the client and
+carry only their own fields. `search` options are typed too (`SearchOptions`: `cache_control`,
 `speaker`, plus `extra` for pass-through).
 
 ```ts
@@ -157,7 +161,8 @@ const hits: Memory[] = await mem.search("what did Bob say?", "alice", 10, { spea
 console.log(hits[0].speaker, hits[0].time_bucket);   // typed: string | undefined
 ```
 
-`hits` arrives best-first — take it in the order given. `similarity` is a raw
+`hits` holds memories best-first, then the assistant's own words and image memories in
+their own order. Take it in the order given. `similarity` is a raw
 closeness score, not the ranking key: what produces the order is internal and is
 not returned, so sorting by `similarity` overrides the ranking and makes results
 worse. There is no `score` field.

@@ -14,7 +14,7 @@
  * (`createStore`) or calls return 404. Every account starts with a `default` store,
  * so with no `userId` anywhere the zero-setup path just works.
  *
- * The API key picks *which memory* (your account); `model` picks *which engine*
+ * The API key picks *which memory* (your workspace); `model` picks *which engine*
  * reads it. Models on the shared pool read the same memory, so you can store with
  * one and recall with another; `listModels()` reports each model's `memory` as
  * `"shared"` or `"isolated"`, and an isolated one starts empty. Set a default in
@@ -22,14 +22,14 @@
  * `mem.withModel("tablet-1").recall(...)`.
  *
  * Recall quality does not depend on which language a memory was written in: a
- * memory stored in one language is found by a question asked in another. Storing
- * and searching call no LLM.
+ * memory stored in one language is found by a question asked in another. No language
+ * model reads your stored memories.
  *
  * Reliability: every call retries transient failures with exponential backoff +
  * jitter, honoring `Retry-After` up to 30s — 429 and a 409 that says another write
  * to the store was in flight, always; 408/502/503/504 and connection errors only when
- * a retry can never double-process a write (idempotent calls, or a failure at connect
- * time). Tune with `maxRetries` (0 disables) and `timeoutMs`, or per call site via
+ * a retry can never double-process a write (reads, the DELETE calls, or a failure at
+ * connect time). Tune with `maxRetries` (0 disables) and `timeoutMs`, or per call site via
  * the `withTimeout()` / `withRetries()` clones.
  *
  * Debugging: set `WONTOPOS_LOG=debug` to log method/path/status/timing/retries
@@ -42,7 +42,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.45";
+const VERSION = "2.2.46";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -74,13 +74,14 @@ const MAX_RETRY_WAIT_MS = 30_000;
 /** setTimeout's ceiling; a longer delay fires after 1ms. */
 const MAX_TIMER_MS = 2_147_483_647;
 /** 502/503 are ambiguous for a write — they can arrive after the write already
- *  landed, and a retried POST would store it twice — so retry them only for
- *  idempotent methods. 504 is the same shape. 408 sits here rather than in
+ *  landed, and a retried POST would store it twice — so retry them only for a call
+ *  that only reads: an idempotent method, or a POST in READ_POSTS. 504 is the same shape. 408 sits here rather than in
  *  RETRY_ALWAYS because an intermediary can answer it without knowing what
  *  happened further along. */
 const RETRY_IF_IDEMPOTENT = new Set([408, 502, 503, 504]);
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE", "OPTIONS"]);
-/** POST routes that only read. When the deadline cuts short a retry of one, the answer
+/** POST routes that only read: retried like an idempotent method, and when the deadline
+ *  cuts short a retry of one, the answer
  *  before it still describes the call, as for an idempotent method. */
 const READ_POSTS = new Set([
   "/api/v1/memory/search",
@@ -670,7 +671,9 @@ export class APIConnectionError extends WosError {}
 export class BadRequestError extends WosError {}
 /** 401 — the API key is missing, wrong, or revoked. */
 export class AuthenticationError extends WosError {}
-/** 402 — no card on file or the balance is depleted. Top up to continue. */
+/** 402 — no card on file, the balance is depleted, or the month's spend cap for the
+ *  account's tier is reached (`details.reason` is `tier_cap_reached`). Top up to
+ *  continue; a top-up also raises the tier. */
 export class PaymentRequiredError extends WosError {}
 /** 403 — the key/model isn't allowed to do this. */
 export class PermissionDeniedError extends WosError {}
@@ -814,8 +817,9 @@ export interface StatusResult {
 /**
  * An image attached to a memory, passed to `add`/`store` via `opts.image`.
  *
- * Both edges must be 700px or more; a smaller image is refused (400). A request
- * body is capped at 10MB.
+ * Both edges must be 700px or more and the long edge at most 2500px, and the image
+ * file at most 7MB; anything else is refused (400) with the reason. A request body is
+ * capped at 10MB.
  *
  * What the service keeps is NOT your original. An image whose long edge is over
  * 1568px is downscaled to 1568 before anything else happens, and that smaller
@@ -862,8 +866,9 @@ export interface ImageBytes {
    * The image as stored. Write it to a file, or wrap it in a Blob to show it.
    *
    * This is the service's copy, not necessarily your upload: anything over 1568px
-   * on its long edge was downscaled on the way in, and re-encoded to WebP unless it
-   * was a JPEG (see `ImageInput`). Take the file extension from `contentType`.
+   * on its long edge (2500 at most) was downscaled on the way in, and re-encoded to
+   * WebP unless it was a JPEG (see `ImageInput`). Take the file extension from
+   * `contentType`.
    */
   bytes: Uint8Array;
   /** Sniffed from the BYTES, not from whatever the upload was named — e.g. `image/jpeg`. */
@@ -943,7 +948,8 @@ export interface LineageStep {
   [key: string]: unknown;
 }
 
-/** `lineage` → the full chain of edits behind one memory, oldest first. */
+/** `lineage` → the edits that followed one memory, from the id passed forward to the
+ *  version in force, oldest first. */
 export interface LineageResult {
   memory_id?: string;
   chain: LineageStep[];
@@ -989,8 +995,8 @@ export interface SearchResult {
   /** Image memories the answer carried (one by default on an image-capable model,
    *  up to `max_images`); `[]` when there were none. */
   images: Memory[];
-  /** Re-ask passes actually performed. Present only when `verify` was sent; lower
-   *  than you asked for means the store had nothing further to add. */
+  /** Re-ask passes that added memories. Present only when `verify` above 0 was sent;
+   *  lower than you asked for means a pass found nothing new, or could not run. */
   verify_used?: number;
   [key: string]: unknown;
 }
@@ -1032,7 +1038,7 @@ export interface UsageResult {
   window_days?: number;
   /** This API key's LIFETIME spend. Never another key's. */
   key?: { requests?: number; cost_cents?: number; input_tokens?: number; output_tokens?: number; since?: string };
-  /** The workspace this key belongs to, over the window. */
+  /** The workspace this key belongs to, over the window: every key in it, not only this one. */
   workspace?: { workspace_id?: string | null; requests?: number; cost_cents?: number };
   /** Per-store spend over the window, highest spend first, and at most 50 rows — a longer
    *  list is cut, so these need not sum to `workspace`. `other`, when present, is an
@@ -1165,9 +1171,8 @@ export interface SpeakersList {
 }
 
 /**
- * Narrow a search to part of a store. The filter chooses what is searched, not what
- * is kept afterwards — so a narrow filter still returns your full `limit` when that
- * many matches sit inside it.
+ * Narrow a search to part of a store. A narrow filter can return fewer than `limit`
+ * even when the store holds more inside it.
  *
  * Retrieval behaves the same in every language, so these behave
  * identically in every language. Unlisted keys are dropped by the API rather than
@@ -1188,7 +1193,8 @@ export interface SearchFilters {
   time_from?: string;
   time_to?: string;
   /** WHEN THE CONTENT HAPPENED (`metadata.event_date`), not when it was written —
-   *  this is the one you usually want. */
+   *  this is the one you usually want. A memory stored without an `event_date` is
+   *  matched by when it was stored. */
   event_from?: string;
   event_to?: string;
   /** Drop matches the engine scored below this importance (0–1). */
@@ -1345,9 +1351,11 @@ export function _resetFilterWarnings(): void {
  *  could not be told from an option that worked. Put a genuinely new one under
  *  `extra`. */
 export interface SearchOptions {
-  /** Recall caching. A hit inside the TTL bills at 0.1× — but the FIRST call
-   *  writes the cache and bills the query tokens at 2× (`5m`) or 3× (`1h`), so
-   *  this only pays for a query you repeat or extend. Do not enable it globally. */
+  /** Recall caching. The same query again inside the TTL bills at 0.1×; one that
+   *  extends the cached query bills only its cached part at 0.1×, the new part at the
+   *  write rate and its results at the normal rate. The FIRST call writes the cache
+   *  and bills the query tokens at 2× (`5m`) or 3× (`1h`), so this only pays for a
+   *  query you repeat or extend. Do not enable it globally. */
   cache_control?: { ttl: "5m" | "1h" };
   /** Recall only this person's words ("me" or a registered name). */
   speaker?: string;
@@ -1356,9 +1364,9 @@ export interface SearchOptions {
   /**
    * Re-ask passes, 0–3. After the first retrieval the service asks the engine again up
    * to this many times, each time telling it what was already returned so it skips
-   * those and reaches further back. No LLM runs at any
+   * those and reaches further back. Raising it adds no language model call at any
    * value. Stops early when a pass finds nothing new; `verify_used` in the response
-   * says how many actually ran.
+   * says how many passes added memories.
    *
    * Each pass is another engine call and can add up to `limit` more memories, so it
    * costs more — you are billed for what is delivered. Default 0. Worth it on questions
@@ -1836,15 +1844,16 @@ export class Client {
   }
 
   // ----- read -----
-  /** Search a store's memories. Returns them most relevant first.
+  /** Search a store's memories. They come most relevant first; the assistant's own
+   *  words and image memories, when there are any, follow them in their own order.
    *
    *  `limit` is 5-20, and out of range is refused rather than clamped: asking for 50
    *  and silently receiving 20 reads as "that is all there is". The default is 10.
    *
-   *  `limit` bounds `memories`, not the returned array. The assistant's own words (on
-   *  a model that lists `self_memories` in its capabilities) and image memories (one
-   *  unless `max_images` says otherwise, on a model that lists `images`) come back in
-   *  it as well, so it can hold more than `limit`. They are billed either way. Size a
+   *  `limit` bounds `memories`, not the returned array, and each `verify` pass can add
+   *  up to `limit` more. The assistant's own words (on a model that lists
+   *  `self_memories` in its capabilities) and image memories (one unless `max_images`
+   *  says otherwise, on a model that lists `images`) come back after them in it as well, so it can hold more than `limit`. They are billed either way. Size a
    *  prompt window on the array you get back, not on `limit`. `searchFull()` hands the
    *  fields back apart.
    *
@@ -1886,7 +1895,7 @@ export class Client {
    *     const r = await mem.searchFull("the day we moved", "alice", 10,
    *                                    { max_images: 3, verify: 2 });
    *     r.images.length;   // the photos, apart from the text memories
-   *     r.verify_used;     // how many re-ask passes actually ran (you are billed per pass)
+   *     r.verify_used;     // re-ask passes that added memories (each billed for what it added)
    *
    * Each option needs a model that lists it in its `listModels()` capabilities
    * (`images`, `re_ask`) and is refused (403) on any other rather than accepted and
@@ -1960,7 +1969,8 @@ export class Client {
     const r = await this.post("/api/v1/memory/history", { user_id: this.uid(userId) });
     return asRecords<HistoryTurn>(r.turns);
   }
-  /** Memory counts for a store: { total_memories, short_term_turns }. */
+  /** Memory counts for a store: { total_memories, short_term_turns }. `total_memories`
+   *  can be larger than the number `listMemories` lists. */
   async stats(userId?: string): Promise<StatsResult> {
     return this.post("/api/v1/memory/stats", { user_id: this.uid(userId) });
   }
@@ -1971,9 +1981,9 @@ export class Client {
    * Free: it carries no charge and skips the balance gate, because an account at zero
    * still has to be able to find out why. Rate-limited instead.
    *
-   * Scoped to THIS key: its own lifetime spend, its workspace and stores over the
-   * window. It never returns another key's spend. `balance_cents` is account-wide,
-   * because that is what gates the next call whichever key makes it.
+   * `key` is THIS key's own lifetime spend. `workspace` and `stores` cover the window
+   * for the workspace this key belongs to, every key in it included. `balance_cents` is
+   * account-wide, because that is what gates the next call whichever key makes it.
    *
    *     const u = await mem.usage(7);
    *     if (u.balance_cents! < 100) stop();
@@ -1987,9 +1997,8 @@ export class Client {
     return this.request("GET", `/api/v1/won/usage?days=${days}`);
   }
   /** Fetch ONE memory by id — the text you stored, and its metadata.
-   * The id is what `add`/`store` or `listMemories` returned. Same visibility as
-   * `listMemories`: an id from another store, an id `listMemories` does not return,
-   * or an invalidated memory rejects with `NotFoundError`. Pass `undefined` as
+   * The id is what `add`/`store` or `listMemories` returned. An unknown id or one
+   * from another store rejects with `NotFoundError`. Pass `undefined` as
    * `userId` for the default store — it is positional here. */
   async get(userId: string | undefined, memoryId: string): Promise<Memory> {
     // Refusals arrive as rejections, like every other method here.
@@ -2068,9 +2077,10 @@ export class Client {
    * Fetch the bytes of an image memory — the picture the SERVICE holds.
    *
    * Not necessarily your upload, in size OR in format: an image whose long edge was
-   * over 1568px was downscaled to 1568 on the way in and re-encoded — lossless
-   * formats as WebP, so a PNG comes back as `image/webp`; JPEG stays JPEG — and that
-   * smaller picture is what is stored and comes back here. Nothing on our side ever
+   * over 1568px (2500 at most) was downscaled to 1568 on the way in and re-encoded —
+   * lossless formats as WebP, so a PNG comes back as `image/webp`; JPEG stays JPEG;
+   * kept as sent when the re-encode came out bigger — and that smaller picture is what
+   * is stored and comes back here. Nothing on our side ever
    * uses more than 1568, so the extra pixels would be bytes nobody reads.
    * Keep your own copy for the full-resolution file.
    *
@@ -2243,11 +2253,13 @@ export class Client {
   }
 
   /**
-   * The full chain of edits behind one memory, oldest first.
+   * The edits that followed one memory: from the id you pass forward to the version in
+   * force, oldest first.
    *
-   * `is_current` marks the version in force. Use it to answer "what did this used to
-   * say, and when did it change" — `revisions()` tells you HOW MUCH a store moved,
-   * this tells you what happened to one fact.
+   * `is_current` marks the version in force. The chain runs forward only, so to answer
+   * "what did this used to say, and when did it change" pass the first version's id;
+   * the current version's id (what `search` returns) comes back alone. `revisions()`
+   * tells you HOW MUCH a store moved, this tells you what happened to one fact.
    */
   async lineage(userId: string | undefined, memoryId: string): Promise<LineageResult> {
     if (typeof memoryId !== "string" || !memoryId.trim()) {
@@ -2291,8 +2303,7 @@ export class Client {
   }
 
   // ----- models -----
-  /** Available models: `[{ id, name, available, memory, capabilities, retires_at? }, ...]`.
-   *  Needs no API key. */
+  /** Available models: `[{ id, name, available, memory, capabilities, retires_at? }, ...]`. */
   async listModels(): Promise<ModelInfo[]> {
     const data = await this.request("GET", "/api/v1/models");
     return asRecords<ModelInfo>(data.models);
@@ -2363,7 +2374,9 @@ export class Client {
     // The normalized list goes last, so a present-but-null `speakers` still arrives as [].
     return { ...r, speakers: asRecords(r?.speakers) } as SpeakersList;
   }
-  /** Unregister a person. Their memories stay; the name tag goes. Retried like
+  /** Unregister a person. Their memories stay, and the name can no longer tag a new
+   *  memory or filter a search. The tag goes from stored memories too, except on
+   *  `tablet-2`, which keeps it on memories already stored with it. Retried like
    *  `deleteStore`, with the same note on a 404 after an ambiguous failure. */
   async removeSpeaker(speaker: string, userId?: string): Promise<SpeakerOpResult> {
     return this.remove("/api/v1/memory/speakers", { user_id: this.uid(userId), speaker });
@@ -2556,12 +2569,12 @@ export class Client {
    *
    * Retried: 429, and a 409 whose error carries `retry_after_ms` (another write to the
    * store was in flight; nothing was stored), on every method; 408/502/503/504 and
-   * dropped connections on idempotent methods; connect failures on every method. A
-   * retry whose wait is over the cap, or does not fit the deadline, is not made: the
-   * call fails with the error of the response it has. So does a retry the deadline
-   * leaves no time to send, and the retry of an idempotent method or of a POST that
-   * only reads that the deadline cuts short. Any other retry cut short stays a status-0
-   * deadline error: a write may have been applied.
+   * dropped connections on a call that only reads (an idempotent method, or a POST
+   * that only reads); connect failures on every method. A retry whose wait is over the
+   * cap, or does not fit the deadline, is not made: the call fails with the error of
+   * the response it has. So does a retry the deadline leaves no time to send, and the
+   * retry of a call that only reads that the deadline cuts short. Any other retry cut
+   * short stays a status-0 deadline error: a write may have been applied.
    */
   private async send(
     method: string,
@@ -2583,10 +2596,13 @@ export class Client {
     }
     const attempts = this.maxRetries + 1;
     const upper = method.toUpperCase();
-    const idempotent = IDEMPOTENT_METHODS.has(upper);
     // Debug logging shows the path WITHOUT its query string — a query can carry
     // a store id (listSpeakers), and logs must never carry data.
     const logPath = path.split("?")[0];
+    // Safe to send again: an idempotent method, or a POST that only reads. Reads were
+    // sent as POST and retried by method only, so search and recall were never retried
+    // on a 502/503/504 or a dropped answer.
+    const idempotent = IDEMPOTENT_METHODS.has(upper) || reads || (upper === "POST" && READ_POSTS.has(logPath));
     const deadlineAt = this.deadlineAt();
     const headers = extraHeaders ? { ...this.headers, ...extraHeaders } : this.headers;
     // Set once an attempt may have reached the service without an answer we could read.
@@ -2614,7 +2630,7 @@ export class Client {
        *  before it; a write reports the deadline, since it may have been applied. */
       const cutShort = (): WosError => {
         const why = att.why();
-        if (why === "deadline" && (idempotent || reads || (upper === "POST" && READ_POSTS.has(logPath))) && previous) {
+        if (why === "deadline" && idempotent && previous) {
           return previous;
         }
         return new APIConnectionError(0, this.abortMessage(why));

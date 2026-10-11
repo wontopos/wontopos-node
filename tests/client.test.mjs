@@ -96,6 +96,35 @@ test("GET is retried on 503 (idempotent)", async () => {
   }
 });
 
+test("a read sent as POST is retried on 502/503/504 like a GET; a write is not", async () => {
+  // search, recall and the other reads go as POST and were retried by method only, so a
+  // cold store's 503 "Retry in a moment" reached the caller instead.
+  for (const status of [502, 503, 504]) {
+    const { server, seen, base } = await scriptedServer([
+      [status, { "Retry-After": "0" }, "{}"],
+      [200, {}, '{"memories":[]}'],
+    ]);
+    try {
+      const mem = new Client({ apiKey: KEY, baseUrl: base });
+      await mem.search("q", "alice");
+      assert.equal(seen.length, 2, `search on ${status}`);
+    } finally {
+      server.close();
+    }
+  }
+  const { server, seen, base } = await scriptedServer([
+    [503, { "Retry-After": "0" }, "{}"],
+    [200, {}, '{"id":"m1","status":"stored"}'],
+  ]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await assert.rejects(() => mem.add("x", "alice"));
+    assert.equal(seen.length, 1, "a write may have landed: not sent again");
+  } finally {
+    server.close();
+  }
+});
+
 test("engram refuses an option it does not know", async () => {
   // engram takes the same two options as recall, so a typo is refused the same way.
   const mem = new Client({ apiKey: KEY });
