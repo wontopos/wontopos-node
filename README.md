@@ -29,7 +29,42 @@ const ctx = await mem.recall("what does alice drink?", "alice");
 
 ## Methods
 
-`add` · `addTurn` · `addBulk` · `update` · `search` · `searchFull` · `recall` · `history` · `stats` · `get` · `listMemories` · `delete` · `deleteAll`
+| Method | What it does |
+|---|---|
+| **Write** | |
+| `add(content, userId?, metadata?, opts?)` | Store one memory. Alias `store`. `opts.image` attaches a photo. |
+| `addTurn(userMsg, assistantMsg, userId?)` | Store one exchange of a conversation. |
+| `addBulk(content, userId?, category?, timestamp?)` | Backfill a long history in one call. |
+| `update(oldMemoryId, newContent, userId?)` | Replace a fact that changed. The old version stays in its history. |
+| **Read** | |
+| `recall(query, userId?, opts?)` | The recent turns, the memories that match and the conversation around the best one, in one call. |
+| `search(query, userId?, limit?, opts?)` | The memories that match, best first. |
+| `searchFull(...)` | The same search with each part kept apart, `images` and `verify_used` included. |
+| `searchSelf(...)` | The assistant's own words, kept apart from what others said. |
+| `history(userId?)` | The recent conversation. |
+| `get(userId, memoryId)` | One memory by id. |
+| `listMemories` · `iterMemories` · `exportMemories` | Every memory in a store: a page at a time, as a stream, or all at once. |
+| `lineage(userId, memoryId)` | The edits that followed one memory. |
+| `revisions(userId?, opts?)` | How many of a store's memories were edited, and which. |
+| `stats(userId?)` | Counts for a store. |
+| `engram(name, query, userId?)` · `listEngrams()` | Built-in retrieval routines, and the ones a model can run. |
+| **Photos** | |
+| `listImages` · `iterImages` · `exportImages` | A store's image memories, newest first. |
+| `getImage(userId, memoryId)` | The bytes of one image. |
+| `forgetImage(userId, memoryId, { preview })` | Remove the photo from a memory. `preview: true` first says whether the memory itself stays. |
+| **People** | |
+| `addSpeaker` · `listSpeakers` · `removeSpeaker` | Register, list and unregister the people a store hears from. |
+| `bySpeaker(speaker, userId?)` | What one person said, newest first. |
+| **Stores** | |
+| `createStore` · `listStores` · `deleteStore` | One isolated memory space per end-user, agent or topic. |
+| `delete(userId, memoryId)` · `deleteAll(userId)` | Delete one memory, or every memory in a store. |
+| **Account** | |
+| `listModels()` | The models you can use, and what each can do. |
+| `usage(days?)` | What this key, its workspace and its stores have spent. Free. |
+| `ping()` | Check the key and the connection. |
+| **Client** | |
+| `withModel` · `withUser` · `withDeadline` · `withTimeout` · `withRetries` · `withSignal` | A copy of the client with another model, store, budget, timeout, retry count or cancel signal. |
+| `Client.fromEnv()` · `rateLimit` | A client with the key from the environment; the last call's rate-limit numbers. |
 
 Where the store id goes depends on whether the method takes a payload. A method that
 writes or searches puts the payload first and the store second — `mem.add("...", "alice")`,
@@ -40,6 +75,29 @@ positionally and cannot — `get`, `getImage`, `delete`, `lineage` and `forgetIm
 an explicit `undefined` there, because a second required argument follows it. Python
 omits it in all five, and Rust takes it positionally (`None` for the default store, where there is one).
 Let your editor confirm the order: every signature is typed. A store is one isolated memory space per end-user, agent, or topic. WHO said each memory inside a store is the `speaker` tag below — storing the assistant's own words never needs a separate id.
+
+## Putting recall into a prompt
+
+```ts
+const ctx = await mem.recall(userMessage, "alice");
+
+const system = [
+  "What you remember about this user, most relevant first:",
+  ...ctx.long_term.memories.map((m) => `- ${m.content}`),
+  "",
+  "Around the most relevant memory:",
+  ...ctx.context.around_top_memory,
+  "",
+  "The conversation so far:",
+  ...ctx.short_term.turns.map((t) => `${t.role}: ${t.content}`),
+].join("\n");
+
+// Call your language model with `system` and the user's message, then store the exchange:
+await mem.addTurn(userMessage, reply, "alice");
+```
+
+Each row of `around_top_memory` starts with `[before] `, `[match] ` or `[after] `: where it
+sits next to the best memory. Keep every list in the order it arrives.
 
 ## Who said it (speakers)
 
@@ -59,6 +117,40 @@ await mem.search("what did Bob say about deadlines?", "alice", 10, { speaker: "B
 `removeSpeaker()` unregisters (memories stay; the tag goes, except on `tablet-2`, which keeps it on memories already stored). A store registers
 up to 50 people to start (a limit we plan to raise); `"me"` never needs
 registration and never counts against it.
+
+## Photos
+
+On a model whose `listModels()` capabilities include `images`, a memory can carry a photo.
+The caption is still required.
+
+```ts
+import { readFileSync, writeFileSync } from "node:fs";
+
+const data = readFileSync("beach.jpg").toString("base64");
+const stored = await mem.add("At the beach with Bob", "alice", {}, { image: { data, taken_at: "2026-08-14" } });
+
+const { bytes, contentType } = await mem.getImage("alice", stored.id!);
+writeFileSync(`beach.${contentType.split("/")[1]}`, bytes);
+```
+
+Both edges must be 700px or more, the long edge at most 2500px and the file at most 7MB;
+anything else is refused (400) with the reason. A long edge over 1568px is stored at
+1568px, so keep your own copy of the original. `search` returns image memories after
+the others, and `listImages` pages through them newest first. `forgetImage` removes the
+photo, and it can remove the whole memory with it: call it with `preview: true` first,
+and `memory_kept` says whether the memory stays.
+
+## Export, edit history and usage
+
+- **Export:** `exportMemories(userId)` returns every memory in a store, the text you
+  stored and its metadata; `exportImages(userId)` every image memory. For a large store,
+  `iterMemories` and `iterImages` stream them a page at a time.
+- **Edit history:** `update` replaces a fact that changed. `lineage(userId, memoryId)` lists
+  the versions from the id you pass forward, oldest first, and marks the one in force with
+  `is_current`; pass the first version's id to see the whole history. `revisions()` counts
+  how many of a store's memories were edited.
+- **Usage:** `usage(days)` reports this key's spend, the workspace's spend over the window,
+  the stores that spent the most, and the balance. It is free, and works at a zero balance.
 
 ## Recall caching
 
@@ -85,12 +177,22 @@ Built in, no configuration needed:
 
 - **Automatic retries** — 429 and a 409 for a write already in flight always, and 408 /
   502 / 503 / 504 or a connection error only when a retry cannot double-process a write.
-  A write may already have landed when any of those four comes back, so a POST write gets
-  429, that 409 and connect-level failures only. The calls that are safe to send again
-  retry all four: the reads sent as POST (`search`, `recall`, `get`, `listMemories`,
-  `stats`, ...) and the GET and DELETE calls (`ping`, `listStores`, `listSpeakers`,
-  `listModels`, `listEngrams`, `usage`, `deleteStore`, `removeSpeaker`, `forgetImage`). Twice, with exponential backoff + jitter, honoring the server's
-  `Retry-After` up to 30s. Tune with `new Client({ maxRetries })`; `0` disables.
+  The calls that are safe to send again retry all four: the reads sent as POST (`search`,
+  `recall`, `get`, `listMemories`, `stats`, ...), the GET and DELETE calls (`ping`,
+  `listStores`, `listSpeakers`, `listModels`, `listEngrams`, `usage`, `deleteStore`,
+  `removeSpeaker`, `forgetImage`), and the memory writes (`add`, `addTurn`, `addBulk`,
+  `update`). Those carry an idempotency key, so the service answers a repeat with the
+  first attempt's result instead of storing again. The other writes sent as POST
+  (`createStore`, `addSpeaker`, `delete`, `deleteAll`) get 429, that 409 and
+  connect-level failures only. Twice, with exponential backoff + jitter, honoring the
+  server's `Retry-After` up to 30s. Tune with `new Client({ maxRetries })`; `0` disables.
+- **Your own retries** — pass `idempotencyKey` when the retry is yours (a job that is
+  re-run, a queue that redelivers). The service keeps a key for 24 hours and answers a
+  repeat with the first response, marked `replayed: true`. When the first attempt did
+  not come back with an answer, so whether it was applied is not known, a repeat
+  is refused with a `ConflictError` (409) rather than stored twice: check before sending
+  it again under a new key. Derive the key from what you store
+  (`` `import:${row.id}` ``), never a constant.
 - **Redirects refused** — the API key never follows a 3xx to another host.
 - **Timeouts** — 30s per attempt by default (`timeoutMs`), and a total budget for
   the whole call across every retry with `deadlineMs` / `withDeadline(ms)`. At the
@@ -131,8 +233,13 @@ timeouts, redirect refusal and the response cap all still apply.
 
 ## Security
 
-Built in, none of it configurable off:
+Built in:
 
+- **No key in a browser page** — anyone who opens a page can read a key in it, and with
+  it every memory in its workspace. A client in a browser page that would send the key to
+  the service is refused: call Wontopos from your server, or point `baseUrl` at a proxy of
+  your own that holds the key. `dangerouslyAllowBrowser: true` turns the refusal off, for
+  a local demo with a key you will revoke.
 - **Redirects refused** — a 3xx is an error, so the key never follows one to
   another host.
 - **Response size cap** — anything over 64MB is refused instead of buffered.
@@ -188,7 +295,8 @@ try {
 
 A retired model answers `410`, thrown as `GoneError`: retrying cannot succeed, so name a
 live model (`listModels()` lists them, with `retires_at` on one that is scheduled to
-retire). `deleteStore` still works under a retired model.
+retire). Before the day, the client warns once with the date the model you use retires.
+`deleteStore` still works under a retired model.
 
 ## A different API host
 
@@ -219,7 +327,7 @@ data to fix it.
 ## Changelog
 
 The three clients release in lockstep — same version, same surface, same day. Patch
-releases are additive. Nine inside 2.2 were not, deliberately and each with its
+releases are additive. Ten inside 2.2 were not, deliberately and each with its
 reason; the changelog lists them.
 
 See [CHANGELOG.md](https://github.com/wontopos/wontopos-node/blob/main/CHANGELOG.md).

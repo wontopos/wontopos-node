@@ -28,9 +28,10 @@
  * Reliability: every call retries transient failures with exponential backoff +
  * jitter, honoring `Retry-After` up to 30s — 429 and a 409 that says another write
  * to the store was in flight, always; 408/502/503/504 and connection errors only when
- * a retry can never double-process a write (reads, the DELETE calls, or a failure at
- * connect time). Tune with `maxRetries` (0 disables) and `timeoutMs`, or per call site via
- * the `withTimeout()` / `withRetries()` clones.
+ * a retry can never double-process a write (reads, the DELETE calls, the memory writes,
+ * which carry an idempotency key, or a failure at connect time). Tune with `maxRetries`
+ * (0 disables) and `timeoutMs`, or per call site via the `withTimeout()` /
+ * `withRetries()` clones.
  *
  * Debugging: set `WONTOPOS_LOG=debug` to log method/path/status/timing/retries
  * to stderr — never memory content, request bodies, or the API key.
@@ -42,7 +43,7 @@
  * `Client.fromEnv()` over keys in source code.
  */
 
-const VERSION = "2.2.46";
+const VERSION = "2.2.47";
 /** Runtime info helps support debug a report ("node 18 on Windows...") —
  * platform only, never anything identifying. Browsers have no `process` (and
  * silently drop the UA header anyway). */
@@ -75,7 +76,9 @@ const MAX_RETRY_WAIT_MS = 30_000;
 const MAX_TIMER_MS = 2_147_483_647;
 /** 502/503 are ambiguous for a write — they can arrive after the write already
  *  landed, and a retried POST would store it twice — so retry them only for a call
- *  that only reads: an idempotent method, or a POST in READ_POSTS. 504 is the same shape. 408 sits here rather than in
+ *  that only reads (an idempotent method, or a POST in READ_POSTS) or a write that
+ *  carries an idempotency key, which the service answers with the first attempt's
+ *  result. 504 is the same shape. 408 sits here rather than in
  *  RETRY_ALWAYS because an intermediary can answer it without knowing what
  *  happened further along. */
 const RETRY_IF_IDEMPOTENT = new Set([408, 502, 503, 504]);
@@ -434,12 +437,9 @@ const RFC850_DATE =
   /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\d{2})-([A-Z][a-z]{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT$/;
 const ASCTIME_DATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) ([ \d]\d) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/;
 
-/** Milliseconds a `Retry-After` value asks for, or `undefined` when it is neither
- *  delta-seconds nor an HTTP-date (RFC 9110). A date in the past asks for 0. */
-function retryAfterMs(v: string | null, now = Date.now()): number | undefined {
-  if (v == null) return undefined;
-  const s = v.trim();
-  if (/^\d+$/.test(s)) return Math.min(Number(s), Number.MAX_SAFE_INTEGER / 1000) * 1000;
+/** An HTTP-date (RFC 9110) as milliseconds since the epoch, or `undefined` when `s` is
+ *  not one. */
+function httpDateMs(s: string, now = Date.now()): number | undefined {
   let parts: [string, string, number, string, string, string] | undefined;
   let m: RegExpExecArray | null;
   if ((m = IMF_FIXDATE.exec(s))) parts = [m[1], m[2], Number(m[3]), m[4], m[5], m[6]];
@@ -454,7 +454,47 @@ function retryAfterMs(v: string | null, now = Date.now()): number | undefined {
   const month = MONTHS.indexOf(mon);
   const d = Number(day), h = Number(hh), mi = Number(mm), se = Number(ss);
   if (month < 0 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 60) return undefined;
-  return Math.max(0, Date.UTC(year, month, d, h, mi, se) - now);
+  return Date.UTC(year, month, d, h, mi, se);
+}
+
+/** Milliseconds a `Retry-After` value asks for, or `undefined` when it is neither
+ *  delta-seconds nor an HTTP-date (RFC 9110). A date in the past asks for 0. */
+function retryAfterMs(v: string | null, now = Date.now()): number | undefined {
+  if (v == null) return undefined;
+  const s = v.trim();
+  if (/^\d+$/.test(s)) return Math.min(Number(s), Number.MAX_SAFE_INTEGER / 1000) * 1000;
+  const at = httpDateMs(s, now);
+  return at === undefined ? undefined : Math.max(0, at - now);
+}
+
+/** Retirements already announced, as `model|day`, so each is said once per process. */
+const warnedRetirements = new Set<string>();
+/** Past this many, no more are said: a server that sends a new date on every answer
+ *  would otherwise grow the set, and the log, without end. */
+const WARNED_RETIREMENTS_MAX = 64;
+
+/** The service names the day a model retires in a `Sunset` header (RFC 8594) on the
+ *  answers that model serves. Said once per model and day: without it the first sign
+ *  is the 410 on the day, and a line on every call would be noise. */
+function warnIfRetiring(model: string, h: { get(name: string): string | null }): void {
+  const v = h.get("Sunset");
+  if (!v) return;
+  const at = httpDateMs(v.trim());
+  if (at === undefined) return;
+  const day = new Date(at).toISOString().slice(0, 10);
+  const k = `${model}|${day}`;
+  if (warnedRetirements.has(k) || warnedRetirements.size >= WARNED_RETIREMENTS_MAX) return;
+  warnedRetirements.add(k);
+  const which = model ? `model ${JSON.stringify(model)}` : "the model this client uses";
+  console.warn(
+    `wontopos: ${which} retires on ${day} (UTC). From then on its calls answer 410, except ` +
+      "deleteStore. listModels() lists the models you can move to.",
+  );
+}
+
+/** @deprecated Test hook. The warn-once set is process-global by design. */
+export function _resetRetirementWarnings(): void {
+  warnedRetirements.clear();
 }
 
 /** How long the error body of an answer that will be retried gets to arrive. The retry
@@ -488,6 +528,30 @@ function tryUrl(s: string, base?: string): URL | undefined {
     return undefined;
   }
 }
+
+/** A page in a browser, where everything in the bundle is readable by whoever opens it:
+ *  a `window` with a `document`. A Web Worker, a server-side render and a `window`
+ *  without a document do not count. */
+function inBrowserPage(): boolean {
+  try {
+    const g = globalThis as any;
+    return typeof g.window !== "undefined" && typeof g.window.document !== "undefined" && typeof g.navigator !== "undefined";
+  } catch {
+    return false;
+  }
+}
+
+/** The hosted service's own hosts. */
+function isServiceHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "wontopos.com" || h.endsWith(".wontopos.com");
+}
+
+const BROWSER_REFUSAL =
+  "wontopos: refusing to run in a browser page. The API key would be readable by anyone who " +
+  "opens the page, and with it every memory in its workspace. Call Wontopos from your server, " +
+  "or put a proxy of your own in front of it and point baseUrl there. For a local demo with a " +
+  "key you will revoke, pass dangerouslyAllowBrowser: true.";
 
 /** The page a relative URL resolves against (`location.href`), where the runtime has one. */
 function pageHref(): string | undefined {
@@ -599,6 +663,23 @@ const memoryFromGet = (r: unknown): Memory => {
   return typeof o.id === "string" ? (o as unknown as Memory) : ({} as Memory);
 };
 
+/** `recall`'s answer with its three lists as its type says: turns and memories that are
+ *  objects, rows around the best memory that are strings. A row of any other kind is
+ *  dropped, as `history` drops it, rather than reaching the caller typed as what it is
+ *  not. Every other field is kept as it arrived. */
+function recallShape(r: unknown): RecallResult {
+  const o = asObj<Record<string, unknown>>(r);
+  const st = asObj<Record<string, unknown>>(o.short_term);
+  const lt = asObj<Record<string, unknown>>(o.long_term);
+  const cx = asObj<Record<string, unknown>>(o.context);
+  return {
+    ...o,
+    short_term: { ...st, turns: asRecords<HistoryTurn>(st.turns) },
+    long_term: { ...lt, memories: asRecords<Memory>(lt.memories) },
+    context: { ...cx, around_top_memory: asList<unknown>(cx.around_top_memory).filter((x): x is string => typeof x === "string") },
+  } as RecallResult;
+}
+
 /** Every memory a search returned — `memories`, then `self_memories`, then
  * `images` — as one array, de-duplicated by id. Each keeps its `speaker` and, for a
  * photo, its `image_ref`, so a caller can still tell them apart. */
@@ -679,8 +760,11 @@ export class PaymentRequiredError extends WosError {}
 export class PermissionDeniedError extends WosError {}
 /** 404 — the store or resource doesn't exist. */
 export class NotFoundError extends WosError {}
-/** 409: another write to this store was in flight (retried automatically; nothing was
- *  stored), or the store id collides with an existing one (not retried). */
+/** 409: another write to this store was in flight, or the first request under this
+ *  write's idempotency key is still running (both retried automatically; nothing was
+ *  stored); the store id collides with an existing one (not retried); or the first
+ *  request under the key did not come back with an answer, so whether it was stored is
+ *  not known (not retried: check before sending it again under a new key). */
 export class ConflictError extends WosError {
   /** The existing store id this one collides with. Set only on a collision, which
    *  retrying cannot fix. */
@@ -801,7 +885,9 @@ export interface StoreResult {
   note?: string;
   /** `true` when this response was REPLAYED from a previous request with the same
    *  `idempotencyKey` — nothing new was stored. Absent on a fresh write. Read it to
-   *  tell "my retry landed" from "my retry was a no-op". */
+   *  tell "my retry landed" from "my retry was a no-op". This client sets it only for
+   *  a key you passed, and then the earlier request can also be an attempt of this same
+   *  call that the client sent again after an answer that left the outcome open. */
   replayed?: boolean;
   [key: string]: unknown;
 }
@@ -1002,9 +1088,14 @@ export interface SearchResult {
 }
 
 export interface RecallResult {
-  short_term: { turns: unknown[]; count: number };
-  long_term: { memories: Memory[]; count: number };
-  context: { around_top_memory: unknown[]; count: number };
+  /** The recent conversation, oldest first. */
+  short_term: { turns: HistoryTurn[]; count: number; [key: string]: unknown };
+  /** The stored memories that match the query, best first. */
+  long_term: { memories: Memory[]; count: number; [key: string]: unknown };
+  /** The conversation around the best memory, in the order it was said. Each row is
+   *  text that starts with where it sits next to that memory: `[before] `, `[match] `
+   *  or `[after] `. Empty when there is no best memory or `context_limit` is 0. */
+  context: { around_top_memory: string[]; count: number; [key: string]: unknown };
   [key: string]: unknown;
 }
 
@@ -1020,7 +1111,7 @@ export interface EngramResult {
   [key: string]: unknown;
 }
 
-/** One turn of the short-term window, as `history()` returns it. */
+/** One turn of the short-term window, as `history()` and `recall()` return it. */
 export interface HistoryTurn {
   /** `"user"` or `"assistant"`. */
   role?: string;
@@ -1322,6 +1413,18 @@ function writeKey(opts: WriteOptions, takesImage = false): string | undefined {
   return opts.idempotencyKey;
 }
 
+/** A key for a write that came without one: `sdk-` and 32 random hex digits. From
+ *  `crypto.randomUUID` where the runtime has it, otherwise `Math.random`, which is
+ *  enough here: the key only has to differ from the workspace's other writes while the
+ *  service keeps it, and one that clashes with a different body is refused, not replayed. */
+function newIdempotencyKey(): string {
+  const c = (globalThis as any).crypto;
+  if (typeof c?.randomUUID === "function") return `sdk-${String(c.randomUUID()).replace(/-/g, "")}`;
+  let hex = "";
+  for (let i = 0; i < 4; i++) hex += Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, "0");
+  return `sdk-${hex}`;
+}
+
 function warnOnUnknownFilters(filters: unknown): void {
   warnOnceUnknownKeys(filters, KNOWN_FILTER_KEYS, warnedFilterKeys, (k) =>
     `wontopos: unknown search filter ${JSON.stringify(k)} — the API drops keys it does not know, ` +
@@ -1403,25 +1506,24 @@ export interface SearchOptions {
 /**
  * Per-call options for a write.
  *
- * `idempotencyKey` makes repeating THIS EXACT write safe: the API replays the first
- * response instead of storing again, for up to 10 minutes, and answers 422 if the
- * same key arrives with a different body. Use it when a retry is your own (a job that
- * died and was re-run, a queue that redelivers). The SDK retries a write on 429, and
- * on a 409 that says another write to the store was in flight: the service answers
- * both before it processes anything, so nothing was stored. It never retries a write
- * on 408 / 502 / 503 / 504 or a dropped body, where the write may already have been
- * applied — without a key the client cannot know whether it was.
+ * Every memory write (`add`, `addTurn`, `addBulk`, `update`) carries an idempotency key:
+ * `idempotencyKey` when you pass one, otherwise one this client makes for the call. With
+ * it the client retries the write on 408 / 502 / 503 / 504 and on a dropped connection,
+ * as it does a read: the service answers a repeat with the first attempt's result instead
+ * of storing again, and one that arrives while the first is still running with a 409 to
+ * wait, which is retried as well.
  *
- * The key covers a retry sent after the first attempt finished. A retry that overlaps
- * a first attempt still running can run twice, so wait for the first to fail before
- * re-sending.
+ * Pass your own key when the retry is yours: a job that died and was re-run, a queue
+ * that redelivers. The service keeps a key for 24 hours and answers a repeat with the
+ * first successful response, marked `replayed: true`; the same key with a different body
+ * is refused (422). A first attempt that failed is not kept, so a repeat of it runs,
+ * unless it did not come back with an answer, so whether it was applied is not known:
+ * then the repeat is refused with a `ConflictError` (409) instead of storing it twice.
+ * Check before sending it again under a new key.
  *
  * The key must be UNIQUE PER LOGICAL WRITE — derive it from the thing being stored
  * (`` `import:${row.id}` ``), never a constant, or the second write replays the first
  * and is silently lost. Format: 1-128 chars of `[A-Za-z0-9._:-]`, checked locally.
- *
- * The window is best-effort and can be shorter than 10 minutes; it is not a durable
- * de-duplication record.
  */
 export interface WriteOptions {
   idempotencyKey?: string;
@@ -1545,6 +1647,12 @@ export interface ClientOptions {
    *  (`res.redirected`) is refused. A fetch that sends the request to another URL
    *  on purpose, such as a proxy that rewrites it, is fine. */
   fetch?: FetchLike;
+  /** Run in a browser page anyway. Off by default: an API key in a page is readable by
+   *  everyone who opens it, and with it every memory in its workspace, so a client in a
+   *  page that would send the key to the service itself is refused. A `baseUrl` of your
+   *  own, a proxy that holds the real key, is not refused. Turn this on only for a local
+   *  demo with a key you will revoke. */
+  dangerouslyAllowBrowser?: boolean;
 }
 
 const DEFAULT_USER = "default";
@@ -1569,6 +1677,8 @@ export class Client {
   private readonly pageRelative: boolean;
   /** Whether the caller supplied `fetch`. */
   private readonly customFetch: boolean;
+  /** Whether the caller asked to run in a browser page anyway. */
+  private readonly allowBrowser: boolean;
   /** The store every call uses unless one passes `userId`. */
   private readonly defaultUser: string;
   private _rateLimit: RateLimit | null = null;
@@ -1625,6 +1735,14 @@ export class Client {
     if (!parsed) throw new Error(notAUrl(trimmed));
     this.pageRelative = !url;
     this.userinfo = Boolean(parsed.username || parsed.password);
+    this.allowBrowser = opts.dangerouslyAllowBrowser === true;
+    // A key in a browser page is readable by everyone who opens the page, and with it
+    // every memory in its workspace. A page that would send it to the service itself is
+    // refused; a base of the caller's own, a proxy that holds the real key, is theirs to
+    // judge.
+    if (!this.allowBrowser && inBrowserPage() && isServiceHost(parsed.hostname)) {
+      throw new Error(BROWSER_REFUSAL);
+    }
     this.timeoutMs = checkMs(opts.timeoutMs) ?? 30_000;
     this.model = opts.model ?? DEFAULT_MODEL;
     if (this.model && !MODEL_RE.test(this.model)) {
@@ -1737,6 +1855,7 @@ export class Client {
       fetch: this.fetchImpl as unknown as FetchLike,
       deadlineMs: this.deadlineMs,
       signal: this.signal,
+      dangerouslyAllowBrowser: this.allowBrowser,
       ...overrides,
     });
   }
@@ -1809,7 +1928,7 @@ export class Client {
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, metadata };
     if (opts.image !== undefined) body.image = normalizeImage(opts.image);
     warnOnUnknownMetadata(metadata);
-    return this.post("/api/v1/memory/store", body, writeKey(opts, true));
+    return this.write("/api/v1/memory/store", body, writeKey(opts, true));
   }
   /** Alias of `add` — store one memory. */
   async store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
@@ -1817,7 +1936,7 @@ export class Client {
   }
   /** Store a conversation turn (user + assistant). Payload first, userId last — same shape as add/search. */
   async addTurn(userMsg: string, assistantMsg: string, userId?: string, opts: WriteOptions = {}): Promise<StatusResult> {
-    return this.post(
+    return this.write(
       "/api/v1/memory/store-turn",
       { user_id: this.uid(userId), user_msg: userMsg, assistant_msg: assistantMsg },
       writeKey(opts),
@@ -1832,11 +1951,11 @@ export class Client {
     // A null category is "not given", as Python's None is: it goes as "general".
     const body: Record<string, unknown> = { user_id: this.uid(userId), content, category: category ?? "general" };
     if (timestamp) body.timestamp = timestamp;
-    return this.post("/api/v1/memory/bulk-store", body, writeKey(opts));
+    return this.write("/api/v1/memory/bulk-store", body, writeKey(opts));
   }
   /** Supersede an old memory with new content. Payload first, userId last — same shape as add/search. */
   async update(oldMemoryId: string, newContent: string, userId?: string, opts: WriteOptions = {}): Promise<UpdateResult> {
-    return this.post(
+    return this.write(
       "/api/v1/memory/supersede",
       { user_id: this.uid(userId), old_memory_id: oldMemoryId, new_content: newContent },
       writeKey(opts),
@@ -1952,7 +2071,7 @@ export class Client {
       checkContextLimit(opts.context_limit);
       body.context_limit = opts.context_limit;
     }
-    return this.post("/api/v1/memory/recall", withForm(body, opts.form, opts.tz));
+    return recallShape(await this.post("/api/v1/memory/recall", withForm(body, opts.form, opts.tz)));
   }
   /** Run a built-in engram ("deep_recall" | "timeline" | "gather" | "equilibrium" |
    * "tone_stabilizer"; the service is the authority — an unknown name comes back with
@@ -2104,10 +2223,10 @@ export class Client {
   }
 
   /**
-   * Remove the PHOTO from a memory, keeping its text.
+   * Remove the PHOTO from a memory. It can take the whole memory with it.
    *
-   * `preview: true` reports what would happen, including `memory_kept`, and changes
-   * nothing. Retried like `deleteStore`; without `preview`, a 404 after an ambiguous
+   * `preview: true` reports what would happen, including `memory_kept` (`false` when
+   * the memory itself would go), and changes nothing. Retried like `deleteStore`; without `preview`, a 404 after an ambiguous
    * failure carries the same note.
    *
    *     const p = await mem.forgetImage(undefined, id, { preview: true });
@@ -2408,8 +2527,16 @@ export class Client {
   }
 
   // ----- internal -----
-  private post(path: string, body: unknown, idempotencyKey?: string): Promise<any> {
-    return this.request("POST", path, body, idempotencyKey);
+  private post(path: string, body: unknown): Promise<any> {
+    return this.request("POST", path, body);
+  }
+  /** A memory write. It always carries an `Idempotency-Key`, the caller's or one made
+   *  for this call, so an answer that leaves the outcome open (408/502/503/504, a
+   *  dropped connection) can be retried: the service answers the retry with the first
+   *  attempt's result instead of storing again. */
+  private write(path: string, body: unknown, idempotencyKey?: string): Promise<any> {
+    const made = idempotencyKey == null;
+    return this.request("POST", path, body, made ? newIdempotencyKey() : idempotencyKey, false, made);
   }
   /** A DELETE that removes something: a 404 after an ambiguous failure says an earlier
    *  attempt may already have removed it. */
@@ -2570,7 +2697,8 @@ export class Client {
    * Retried: 429, and a 409 whose error carries `retry_after_ms` (another write to the
    * store was in flight; nothing was stored), on every method; 408/502/503/504 and
    * dropped connections on a call that only reads (an idempotent method, or a POST
-   * that only reads); connect failures on every method. A retry whose wait is over the
+   * that only reads) or a write that carries an idempotency key; connect failures on
+   * every method. A retry whose wait is over the
    * cap, or does not fit the deadline, is not made: the call fails with the error of
    * the response it has. So does a retry the deadline leaves no time to send, and the
    * retry of a call that only reads that the deadline cuts short. Any other retry cut
@@ -2603,6 +2731,12 @@ export class Client {
     // sent as POST and retried by method only, so search and recall were never retried
     // on a 502/503/504 or a dropped answer.
     const idempotent = IDEMPOTENT_METHODS.has(upper) || reads || (upper === "POST" && READ_POSTS.has(logPath));
+    // A write with an idempotency key is safe to send again too: the service answers a
+    // repeat with the first attempt's result, and one that arrives while the first is
+    // still running with a 409 to wait. Every memory write carries one. Only `idempotent`
+    // decides what a deadline that cuts a retry short reports: a keyed write may still
+    // have been applied by the attempt the deadline cut.
+    const replaySafe = idempotent || extraHeaders?.["Idempotency-Key"] !== undefined;
     const deadlineAt = this.deadlineAt();
     const headers = extraHeaders ? { ...this.headers, ...extraHeaders } : this.headers;
     // Set once an attempt may have reached the service without an answer we could read.
@@ -2652,9 +2786,10 @@ export class Client {
         const timedOut = e?.name === "AbortError" || att.signal.aborted;
         if (timedOut) throw cutShort();
         // Other network errors retry only when a retry can't double-process a write:
-        // idempotent methods always; writes only when the connection never opened.
+        // idempotent methods and keyed writes always; other writes only when the
+        // connection never opened.
         const connect = isConnectFailure(e);
-        if ((idempotent || connect) && !last) {
+        if ((replaySafe || connect) && !last) {
           if (!connect) ambiguous = true;
           await pauseWithoutAnswer(e?.code ?? e?.name ?? "network error");
           continue;
@@ -2668,9 +2803,9 @@ export class Client {
         } catch (e: any) {
           if (e?.name === "AbortError" || att.signal.aborted) throw cutShort();
           if (e instanceof WosError) throw e; // the size cap — already the right error
-          // A drop while READING the body is a transport failure. Retried on an
-          // idempotent method; a write may already have been applied.
-          if (idempotent && !last) return null;
+          // A drop while READING the body is a transport failure. Retried when sending
+          // again is safe (`replaySafe`); any other write may already have been applied.
+          if (replaySafe && !last) return null;
           throw this.networkError(e, path);
         }
       };
@@ -2701,12 +2836,13 @@ export class Client {
           );
         }
         this._rateLimit = parseRateLimit(res.headers) ?? this._rateLimit;
+        warnIfRetiring(this.model, res.headers);
         if (!res.ok) {
           const ra = retryAfterMs(res.headers.get("Retry-After"));
           // How long to wait before retrying this status; undefined when it is not
           // retried. A 409's comes from its body, below.
           let wait =
-            RETRY_ALWAYS.has(res.status) || (RETRY_IF_IDEMPOTENT.has(res.status) && idempotent)
+            RETRY_ALWAYS.has(res.status) || (RETRY_IF_IDEMPOTENT.has(res.status) && replaySafe)
               ? ra ?? this.backoffMs(attempt)
               : undefined;
           // The retry does not need the body, so a stalled one gets a moment, not the
@@ -2865,6 +3001,8 @@ export class Client {
     body?: unknown,
     idempotencyKey?: string,
     removes = false,
+    // The key was made by this client for the call, not passed by the caller.
+    madeKey = false,
   ): Promise<any> {
     const extraHeaders = this.idemHeader(idempotencyKey);
     // Serialized ONCE, before any attempt. A value JSON cannot carry (an ORM entity, a
@@ -2907,8 +3045,9 @@ export class Client {
     // `Idempotent-Replayed: true`, and it answers the question someone using an
     // idempotency key is asking: did my retry write, or is this the first response
     // coming back again? Only when the body does not already carry the field: what
-    // the service said wins.
-    if (res.headers.get("Idempotent-Replayed") === "true" && !("replayed" in data)) {
+    // the service said wins. Not for a key this client made: the caller's one call
+    // stored once, and `replayed` would tell them nothing was stored.
+    if (!madeKey && res.headers.get("Idempotent-Replayed") === "true" && !("replayed" in data)) {
       (data as Record<string, unknown>).replayed = true;
     }
     return data;

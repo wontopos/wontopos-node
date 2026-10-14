@@ -71,13 +71,65 @@ test("search opts cannot override reserved fields (user_id / query / max_results
   }
 });
 
-test("POST write is NOT retried on 502 (no duplicate store)", async () => {
+test("a POST write without a key is NOT retried on 502 (no duplicate write)", async () => {
   const { server, seen, base } = await scriptedServer([[502, {}, '{"error":"bad gateway"}']]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
-    await assert.rejects(mem.add("hi", "u"), (e) => e.status === 502);
-    assert.equal(seen.length, 1); // no retry on a non-idempotent write
+    await assert.rejects(mem.createStore("u"), (e) => e.status === 502);
+    assert.equal(seen.length, 1); // no retry on a write the service cannot de-duplicate
+    assert.equal(seen[0].headers["idempotency-key"], undefined);
   } finally {
+    server.close();
+  }
+});
+
+test("a memory write IS retried on 502, with the same key on every attempt", async () => {
+  // The service answers a repeat of a keyed write with the first attempt's result, so
+  // sending it again cannot store it twice.
+  const { server, seen, base } = await scriptedServer([
+    [502, { "Retry-After": "0" }, '{"error":"bad gateway"}'],
+    [200, {}, '{"id":"m1","status":"stored"}'],
+  ]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    const r = await mem.add("hi", "u");
+    assert.equal(r.id, "m1");
+    assert.equal(seen.length, 2);
+    const k = seen[0].headers["idempotency-key"];
+    assert.match(k, /^sdk-[0-9a-f]{32}$/);
+    assert.equal(seen[1].headers["idempotency-key"], k, "a retry must repeat the key, or it is a second write");
+    assert.equal(seen[1].body, seen[0].body, "a retry must repeat the body, or the key is refused");
+  } finally {
+    server.close();
+  }
+});
+
+test("each memory write gets a key of its own", async () => {
+  const { server, seen, base } = await scriptedServer(Array(4).fill([200, {}, '{"id":"m","status":"stored"}']));
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.add("same text", "u");
+    await mem.add("same text", "u");
+    await mem.addTurn("hi", "yo", "u");
+    await mem.update("m1", "new", "u");
+    const keys = seen.map((r) => r.headers["idempotency-key"]);
+    for (const k of keys) assert.match(k, /^sdk-[0-9a-f]{32}$/);
+    assert.equal(new Set(keys).size, 4, "two writes sharing a key would replay the first and lose the second");
+  } finally {
+    server.close();
+  }
+});
+
+test("a key made without crypto.randomUUID still has the right shape", async () => {
+  const { server, seen, base } = await scriptedServer([[200, {}, '{"id":"m1","status":"stored"}']]);
+  const desc = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", { value: undefined, configurable: true, writable: true });
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.add("x", "u");
+    assert.match(seen[0].headers["idempotency-key"], /^sdk-[0-9a-f]{32}$/);
+  } finally {
+    if (desc) Object.defineProperty(globalThis, "crypto", desc);
     server.close();
   }
 });
@@ -114,12 +166,12 @@ test("a read sent as POST is retried on 502/503/504 like a GET; a write is not",
   }
   const { server, seen, base } = await scriptedServer([
     [503, { "Retry-After": "0" }, "{}"],
-    [200, {}, '{"id":"m1","status":"stored"}'],
+    [200, {}, '{"status":"created"}'],
   ]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
-    await assert.rejects(() => mem.add("x", "alice"));
-    assert.equal(seen.length, 1, "a write may have landed: not sent again");
+    await assert.rejects(() => mem.createStore("alice"));
+    assert.equal(seen.length, 1, "a write without a key may have landed: not sent again");
   } finally {
     server.close();
   }
@@ -151,12 +203,12 @@ for (const status of [504, 408]) {
     }
   });
 
-  test(`POST write is NOT retried on ${status}`, async () => {
-    // Widening the set must not start retrying writes.
+  test(`a POST write without a key is NOT retried on ${status}`, async () => {
+    // Widening the set must not start retrying writes the service cannot de-duplicate.
     const { server, seen, base } = await scriptedServer([[status, {}, '{"error":"gateway"}']]);
     try {
       const mem = new Client({ apiKey: KEY, baseUrl: base });
-      await assert.rejects(mem.add("hi", "u"), (e) => e.status === status);
+      await assert.rejects(mem.addSpeaker("Bob", "u"), (e) => e.status === status);
       assert.equal(seen.length, 1);
     } finally {
       server.close();
@@ -484,12 +536,23 @@ function droppingServer() {
   );
 }
 
-test("POST is NOT retried on a mid-stream connection drop (no duplicate write)", async () => {
+test("a POST without a key is NOT retried on a mid-stream connection drop (no duplicate write)", async () => {
+  const { server, conns, base } = await droppingServer();
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 1 });
+    await assert.rejects(mem.createStore("u"), (e) => e instanceof WosError && e.status === 0);
+    assert.equal(conns.length, 1); // exactly one attempt — the write may have landed
+  } finally {
+    server.close();
+  }
+});
+
+test("a memory write IS retried on a mid-stream connection drop (it carries a key)", async () => {
   const { server, conns, base } = await droppingServer();
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 1 });
     await assert.rejects(mem.add("hi", "u"), (e) => e instanceof WosError && e.status === 0);
-    assert.equal(conns.length, 1); // exactly one attempt — the write may have landed
+    assert.equal(conns.length, 2); // dropped once, then sent again under the same key
   } finally {
     server.close();
   }
@@ -1054,7 +1117,7 @@ test("idempotency key rides on the write as a header", async () => {
   }
 });
 
-test("every write can carry a key, and no key means no header", async () => {
+test("every write can carry a key, and one without gets a key the client made", async () => {
   const { server, seen, base } = await scriptedServer(Array(5).fill([200, {}, "{}"]));
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
@@ -1063,10 +1126,9 @@ test("every write can carry a key, and no key means no header", async () => {
     await mem.addBulk("blob", "alice", "general", undefined, { idempotencyKey: "k3" });
     await mem.update("m1", "new", "alice", { idempotencyKey: "k4" });
     await mem.add("x", "alice");
-    assert.deepEqual(
-      seen.map((r) => r.headers["idempotency-key"]),
-      ["k1", "k2", "k3", "k4", undefined],
-    );
+    const keys = seen.map((r) => r.headers["idempotency-key"]);
+    assert.deepEqual(keys.slice(0, 4), ["k1", "k2", "k3", "k4"]);
+    assert.match(keys[4], /^sdk-[0-9a-f]{32}$/);
   } finally {
     server.close();
   }
@@ -1236,6 +1298,23 @@ test("whether an idempotent write was replayed shows up in the result", async ()
   }
 });
 
+test("a replay of the client's own retry is not reported as replayed", async () => {
+  // The caller made one call and it stored once: `replayed` would tell them it did not.
+  const { server, seen, base } = await scriptedServer([
+    [503, { "Retry-After": "0" }, "{}"],
+    [200, { "Idempotent-Replayed": "true" }, '{"id":"m1","status":"stored"}'],
+  ]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    const r = await mem.add("x", "alice");
+    assert.equal(seen.length, 2);
+    assert.equal(r.id, "m1");
+    assert.equal(r.replayed, undefined);
+  } finally {
+    server.close();
+  }
+});
+
 test("410 is a GoneError, says what to do, and is not retried", async () => {
   const { GoneError } = await import("../dist/wontopos.js");
   const body = JSON.stringify({ type: "error", error: { type: "gone_error", message: "Scroll 1 now exists only in memory.", code: 0, request_id: "req_410" } });
@@ -1287,7 +1366,7 @@ test("a write option the client does not know is warned about, not dropped silen
     const mem = new Client({ apiKey: KEY, baseUrl: base });
     await mem.add("x", "alice", {}, { idempotency_key: "job-7" });
     await mem.add("y", "alice", {}, { idempotencyKey: "job-8" });
-    assert.equal(seen[0].headers["idempotency-key"], undefined, "only idempotencyKey is the option");
+    assert.match(seen[0].headers["idempotency-key"], /^sdk-[0-9a-f]{32}$/, "only idempotencyKey is the option: job-7 is not sent");
     assert.equal(seen[1].headers["idempotency-key"], "job-8");
     assert.ok(warned.some((m) => m.includes('"idempotency_key"')), `warnings: ${warned}`);
     await mem.addBulk("blob", "alice", null, undefined, { image: { data: "aGk=" } });
@@ -3059,7 +3138,7 @@ test("no error shows the password in a baseUrl's userinfo", async () => {
 
 // ── the transport ──────────────────────────────────────────────────────────
 
-test("a POST whose socket failed after connecting is not re-sent", async () => {
+test("a POST without a key whose socket failed after connecting is not re-sent", async () => {
   const { APIConnectionError } = await import(DIST);
   for (const [code, syscall] of [["EHOSTUNREACH", "read"], ["ECONNREFUSED", "write"], ["ENETUNREACH", undefined]]) {
     let calls = 0;
@@ -3072,9 +3151,27 @@ test("a POST whose socket failed after connecting is not re-sent", async () => {
         throw new TypeError("fetch failed", { cause: Object.assign(new Error(`${syscall} ${code}`), { code, syscall }) });
       },
     });
-    await assert.rejects(mem.add("hi", "alice"), (e) => e instanceof APIConnectionError);
+    await assert.rejects(mem.createStore("alice"), (e) => e instanceof APIConnectionError);
     assert.equal(calls, 1, `${code}/${syscall} was re-sent`);
   }
+});
+
+test("a memory write whose socket failed after connecting is re-sent under the same key", async () => {
+  const { APIConnectionError } = await import(DIST);
+  const keys = [];
+  const mem = new Client({
+    apiKey: KEY,
+    baseUrl: "http://127.0.0.1:9",
+    maxRetries: 2,
+    fetch: async (_url, init) => {
+      keys.push(init.headers["Idempotency-Key"]);
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("read EHOSTUNREACH"), { code: "EHOSTUNREACH", syscall: "read" }) });
+    },
+  });
+  await assert.rejects(mem.add("hi", "alice"), (e) => e instanceof APIConnectionError);
+  assert.equal(keys.length, 3);
+  assert.equal(new Set(keys).size, 1);
+  assert.match(keys[0], /^sdk-[0-9a-f]{32}$/);
 });
 
 test("a POST that never connected is re-sent", async () => {
@@ -3445,6 +3542,8 @@ test("the published types need neither the DOM lib nor @types/node", async () =>
       'const mem = new Client({ apiKey: "wos-x", timeoutMs: 1000 });',
       "const o: ClientOptions = { apiKey: \"wos-x\" };",
       "mem.search(\"q\").then((m) => m.length).catch((e) => e instanceof WosError);",
+      // recall's recent turns and surrounding rows are typed, not unknown[].
+      "mem.recall(\"q\").then((r) => { const t: string | undefined = r.short_term.turns[0]?.content; const c: string = r.context.around_top_memory[0] ?? \"\"; return [t, c]; });",
       "void o;",
     ].join("\n"));
     check(["ES2022", "DOM"], [
@@ -3455,5 +3554,117 @@ test("the published types need neither the DOM lib nor @types/node", async () =>
     ].join("\n"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ----- 2.2.47: a model's retirement is said before the day -----
+
+test("a Sunset header warns once per model and day", async () => {
+  const { _resetRetirementWarnings } = await import(DIST);
+  _resetRetirementWarnings();
+  const sunset = { Sunset: "Sat, 07 Nov 2026 00:00:00 GMT" };
+  const { server, base } = await scriptedServer([
+    [200, sunset, '{"memories":[]}'],
+    [200, sunset, '{"memories":[]}'],
+    [200, { Sunset: "Sun, 08 Nov 2026 00:00:00 GMT" }, '{"memories":[]}'],
+  ]);
+  const said = [];
+  const orig = console.warn;
+  console.warn = (m) => said.push(String(m));
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, model: "scroll-1" });
+    await mem.search("q", "alice");
+    await mem.search("q", "alice");
+    assert.equal(said.length, 1, "once per model and day, not on every call");
+    assert.match(said[0], /"scroll-1" retires on 2026-11-07/);
+    assert.match(said[0], /410/);
+    await mem.search("q", "alice");
+    assert.equal(said.length, 2, "a new day is news");
+  } finally {
+    console.warn = orig;
+    server.close();
+    _resetRetirementWarnings();
+  }
+});
+
+test("no Sunset header, or one that is not a date, says nothing", async () => {
+  const { _resetRetirementWarnings } = await import(DIST);
+  _resetRetirementWarnings();
+  const { server, base } = await scriptedServer([
+    [200, {}, '{"memories":[]}'],
+    [200, { Sunset: "soon" }, '{"memories":[]}'],
+  ]);
+  const said = [];
+  const orig = console.warn;
+  console.warn = (m) => said.push(String(m));
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    await mem.search("q", "alice");
+    await mem.search("q", "alice");
+    assert.deepEqual(said, []);
+  } finally {
+    console.warn = orig;
+    server.close();
+  }
+});
+
+// ----- 2.2.47: a browser page does not get the key -----
+
+/** Run `fn` as if inside a browser page: a window with a document, and a navigator. */
+function asBrowserPage(fn) {
+  const hadWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const hadNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "window", { value: { document: {} }, configurable: true, writable: true });
+  if (!hadNavigator) Object.defineProperty(globalThis, "navigator", { value: {}, configurable: true, writable: true });
+  try {
+    return fn();
+  } finally {
+    if (hadWindow) Object.defineProperty(globalThis, "window", hadWindow);
+    else delete globalThis.window;
+    if (!hadNavigator) delete globalThis.navigator;
+  }
+}
+
+test("a browser page that would send the key to the service is refused", () => {
+  asBrowserPage(() => {
+    assert.throws(() => new Client({ apiKey: KEY }), /refusing to run in a browser page/);
+    assert.throws(() => new Client({ apiKey: KEY, baseUrl: "https://api.wontopos.com" }), /dangerouslyAllowBrowser/);
+  });
+});
+
+test("dangerouslyAllowBrowser, or a base of the caller's own, lets a page through", () => {
+  asBrowserPage(() => {
+    const demo = new Client({ apiKey: KEY, dangerouslyAllowBrowser: true });
+    // A clone keeps the choice: withModel must not start refusing.
+    demo.withModel("tablet-2");
+    new Client({ apiKey: "placeholder", baseUrl: "https://proxy.example.com/wos" });
+  });
+});
+
+test("outside a browser page nothing changes", () => {
+  new Client({ apiKey: KEY });
+});
+
+test("recall hands back its lists as typed: rows of another kind are dropped", async () => {
+  const body = JSON.stringify({
+    short_term: { turns: [{ role: "user", content: "hi" }, "not a turn", null], count: 3 },
+    long_term: { memories: [{ id: "m1", content: "tea" }, 7], count: 2 },
+    context: { around_top_memory: ["[before] a", 3, { x: 1 }, "[match] b"], count: 4 },
+    instruction: "kept",
+  });
+  const { server, base } = await scriptedServer([[200, {}, body], [200, {}, "{}"]]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    const r = await mem.recall("q", "alice");
+    assert.deepEqual(r.short_term.turns, [{ role: "user", content: "hi" }]);
+    assert.deepEqual(r.long_term.memories, [{ id: "m1", content: "tea" }]);
+    assert.deepEqual(r.context.around_top_memory, ["[before] a", "[match] b"]);
+    assert.equal(r.short_term.count, 3, "what the service said is kept");
+    assert.equal(r.instruction, "kept");
+    // An answer that carries none of the parts still has the lists to iterate.
+    const empty = await mem.recall("q", "alice");
+    assert.deepEqual([empty.short_term.turns, empty.long_term.memories, empty.context.around_top_memory], [[], [], []]);
+  } finally {
+    server.close();
   }
 });
