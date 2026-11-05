@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    /* Body comments are ours; the doc comments on exported declarations are the
+     * customer's. tsc emits the first only into .js and the second only into .d.ts,
+     * so the two are split across this file and tsconfig.types.json. */
+    "removeComments": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "declaration": false,
+    "outDir": "./dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "rootDir": "./src"
+  },
+  "include": [
+    "src/**/*.ts"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "removeComments": false,
+    // sleep.ts exports what wontopos.ts runs; those are marked @internal and stay out of the types.
+    "stripInternal": true
+  }
+}

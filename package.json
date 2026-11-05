@@ -1,0 +1,58 @@
+{
+  "name": "wontopos",
+  "version": "2.2.49",
+  "description": "Wontopos \u2014 long-term memory for AI agents. Identical recall in every language, ~100\u00d7 lower LLM bill.",
+  "keywords": [
+    "memory",
+    "ai",
+    "agent",
+    "llm",
+    "multilingual",
+    "rag",
+    "context"
+  ],
+  "homepage": "https://wontopos.com",
+  "license": "MIT",
+  "author": "Wontopos",
+  "type": "module",
+  "main": "./dist/cjs/wontopos.js",
+  "module": "./dist/wontopos.js",
+  "types": "./dist/wontopos.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/wontopos.d.ts",
+        "default": "./dist/wontopos.js"
+      },
+      "require": {
+        "types": "./dist/cjs/wontopos.d.cts",
+        "default": "./dist/cjs/wontopos.js"
+      },
+      "default": "./dist/wontopos.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.types.json && tsc -p tsconfig.cjs.json && node -e \"const fs=require('fs');fs.writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n');fs.copyFileSync('dist/wontopos.d.ts','dist/cjs/wontopos.d.cts');fs.copyFileSync('dist/sleep.d.ts','dist/cjs/sleep.d.ts')\"",
+    "test": "npm run build && node --test tests/client.test.mjs tests/rooms-work.test.mjs tests/router.test.mjs tests/sleep.test.mjs tests/sleep-attacks.test.mjs tests/cjs.test.cjs",
+    "prepublishOnly": "npm run build && node scripts/pre-publish.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "bugs": {
+    "url": "https://wontopos.com/contact?topic=bug"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wontopos/wontopos-node.git"
+  }
+}

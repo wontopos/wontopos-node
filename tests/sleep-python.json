@@ -1,0 +1,1669 @@
+{
+ "tokens": [
+  [
+   "",
+   0
+  ],
+  [
+   "abcd",
+   1
+  ],
+  [
+   "2024\u5e74 10\u6708 20\u65e5 \u5348\u5f8c 3\u6642\u306e \u5929\u6c17\u306f \u6674\u308c.",
+   22
+  ],
+  [
+   "\ud83d\ude00\ud83c\udf89 emoji and \ud835\udfcf\ud835\udfd0 astral digits",
+   11
+  ],
+  [
+   "e1, e2 \u00b7 \u65e5\u4ed8 2026-10-20",
+   12
+  ],
+  [
+   "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8\u3002\u30ab\u30bf\u30ab\u30ca",
+   17
+  ],
+  [
+   "na\u00efve caf\u00e9 \u2014 r\u00e9sum\u00e9",
+   7
+  ],
+  [
+   "\u041f\u0440\u0438\u0432\u0435\u0442, \u043c\u0438\u0440! 123456789",
+   9
+  ],
+  [
+   "\u0661\u0662\u0663 \u0639\u0631\u0628\u064a",
+   4
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   228
+  ],
+  [
+   "\u0085\u3000 tabs\tand\nlines",
+   6
+  ],
+  [
+   "\u4eca\u65e5",
+   3
+  ],
+  [
+   "\u3053\u3093\u3070\u3093\u306f \u4eca\u65e5\u306f 2026\u5e74 10\u6708",
+   17
+  ],
+  [
+   "\u1200\u10ff",
+   2
+  ]
+ ],
+ "when": [
+  [
+   "2026-10-20T09:30:00+09:00",
+   [
+    "2026-10-20 09:30",
+    1792456200.0
+   ]
+  ],
+  [
+   "2026-10-20T09:30:00.123456Z",
+   [
+    "2026-10-20 09:30",
+    1792488600.123456
+   ]
+  ],
+  [
+   "2026-10-20T09:30:00.1234567-05:30",
+   [
+    "2026-10-20 09:30",
+    1792508400.123456
+   ]
+  ],
+  [
+   "2026-02-30T00:00:00Z",
+   null
+  ],
+  [
+   "\uff12\uff10\uff12\uff16-\uff11\uff10-\uff12\uff10T09:30:00Z",
+   [
+    "\uff12\uff10\uff12\uff16-\uff11\uff10-\uff12\uff10 09:30",
+    1792488600.0
+   ]
+  ],
+  [
+   "0001-01-01T00:00:00+01:00",
+   null
+  ],
+  [
+   "9999-12-31T23:59:59-01:00",
+   null
+  ],
+  [
+   "2026-10-20 09:30",
+   [
+    "2026-10-20 09:30",
+    1792488600.0
+   ]
+  ],
+  [
+   "2026-10-20",
+   [
+    "2026-10-20 00:00",
+    1792454400.0
+   ]
+  ],
+  [
+   "2026-10-20T24:00:00Z",
+   null
+  ],
+  [
+   "2026-10-20T09:30:60Z",
+   null
+  ],
+  [
+   "2026-10-20T09:30:00+0930",
+   [
+    "2026-10-20 09:30",
+    1792454400.0
+   ]
+  ],
+  [
+   "2026-10-20T09:30",
+   [
+    "2026-10-20 09:30",
+    1792488600.0
+   ]
+  ],
+  [
+   "2026-10-20T09:30:00.5z",
+   [
+    "2026-10-20 09:30",
+    1792488600.5
+   ]
+  ],
+  [
+   "1969-12-31T23:59:59.999999Z",
+   [
+    "1969-12-31 23:59",
+    -1e-06
+   ]
+  ],
+  [
+   "2026-10-20T09:30:00Z ",
+   null
+  ],
+  [
+   20261020,
+   null
+  ],
+  [
+   null,
+   null
+  ]
+ ],
+ "eids": [
+  [
+   [
+    "e1",
+    "e11"
+   ],
+   [
+    "e1",
+    "e11"
+   ]
+  ],
+  [
+   "e1, e11",
+   [
+    "e1",
+    "e11"
+   ]
+  ],
+  [
+   [
+    "e1,e11",
+    "e13"
+   ],
+   [
+    "e1",
+    "e11",
+    "e13"
+   ]
+  ],
+  [
+   "e1, e1",
+   [
+    "e1"
+   ]
+  ],
+  [
+   [
+    "e1",
+    "e1"
+   ],
+   [
+    "e1"
+   ]
+  ],
+  [
+   "e12\u756a e13 x",
+   [
+    "e13"
+   ]
+  ],
+  [
+   "\u4e00e3 e4\u4e00 e5",
+   [
+    "e5"
+   ]
+  ],
+  [
+   "xe1 e2x e3_ _e4 e5",
+   [
+    "e5"
+   ]
+  ],
+  [
+   "e\u0661\u0662 and e\u0663",
+   [
+    "e\u0661\u0662",
+    "e\u0663"
+   ]
+  ],
+  [
+   [
+    [
+     "e1",
+     "e2"
+    ]
+   ],
+   [
+    "e1",
+    "e2"
+   ]
+  ],
+  [
+   [
+    {
+     "line": "e5"
+    }
+   ],
+   [
+    "e5"
+   ]
+  ],
+  [
+   [
+    12,
+    null,
+    true
+   ],
+   []
+  ],
+  [
+   "(e7)/e8;e9",
+   [
+    "e7",
+    "e8",
+    "e9"
+   ]
+  ],
+  [
+   "\u00e91 e1",
+   [
+    "e1"
+   ]
+  ],
+  [
+   12,
+   []
+  ],
+  [
+   null,
+   []
+  ]
+ ],
+ "str": [
+  [
+   null,
+   "None"
+  ],
+  [
+   true,
+   "True"
+  ],
+  [
+   false,
+   "False"
+  ],
+  [
+   1,
+   "1"
+  ],
+  [
+   -7,
+   "-7"
+  ],
+  [
+   1.5,
+   "1.5"
+  ],
+  [
+   0.1,
+   "0.1"
+  ],
+  [
+   1e-05,
+   "1e-05"
+  ],
+  [
+   123.456,
+   "123.456"
+  ],
+  [
+   1.5e-07,
+   "1.5e-07"
+  ],
+  [
+   "s",
+   "s"
+  ],
+  [
+   [
+    "a",
+    1,
+    null
+   ],
+   "['a', 1, None]"
+  ],
+  [
+   {
+    "a": "b'c",
+    "d": [
+     true
+    ]
+   },
+   "{'a': \"b'c\", 'd': [True]}"
+  ],
+  [
+   {
+    "x": "q\"r",
+    "y": "both'\""
+   },
+   "{'x': 'q\"r', 'y': 'both\\'\"'}"
+  ],
+  [
+   "\n\t",
+   "\n\t"
+  ],
+  [
+   [
+    "\u0085",
+    "\u200b",
+    "\udb40\udc01",
+    "\u007f"
+   ],
+   "['\\x85', '\\u200b', '\\U000e0001', '\\x7f']"
+  ],
+  [
+   [
+    "\u65e5\u672c",
+    "\ud83d\ude00"
+   ],
+   "['\u65e5\u672c', '\ud83d\ude00']"
+  ],
+  [
+   [],
+   "[]"
+  ],
+  [
+   {},
+   "{}"
+  ],
+  [
+   9007199254740992,
+   "9007199254740992"
+  ],
+  [
+   9007199254740996.0,
+   "9007199254740996.0"
+  ],
+  [
+   1.152921504606847e+18,
+   "1.152921504606847e+18"
+  ],
+  [
+   1e+20,
+   "1e+20"
+  ],
+  [
+   [
+    1e+300
+   ],
+   "[1e+300]"
+  ]
+ ],
+ "int": [
+  [
+   " 12 ",
+   12
+  ],
+  [
+   "+5",
+   5
+  ],
+  [
+   "-3",
+   -3
+  ],
+  [
+   "1_000",
+   1000
+  ],
+  [
+   "\u0661\u0662",
+   12
+  ],
+  [
+   "\uff11\uff12",
+   12
+  ],
+  [
+   true,
+   1
+  ],
+  [
+   false,
+   0
+  ],
+  [
+   2.9,
+   2
+  ],
+  [
+   -2.9,
+   -2
+  ],
+  [
+   "2.0",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "1__0",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "_1",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "\u00b2",
+   {
+    "error": "ValueError"
+   }
+  ]
+ ],
+ "int_none": {
+  "error": "TypeError"
+ },
+ "strip": [
+  [
+   "  a  ",
+   "a"
+  ],
+  [
+   "\u0085a\u3000",
+   "a"
+  ],
+  [
+   "\ufeffa\ufeff",
+   "\ufeffa\ufeff"
+  ],
+  [
+   "\u001cb\u001f",
+   "b"
+  ],
+  [
+   "\u200bc\u200b",
+   "\u200bc\u200b"
+  ],
+  [
+   "\u2028d\u2029",
+   "d"
+  ],
+  [
+   "\u00a0e\u202f",
+   "e"
+  ]
+ ],
+ "format_room": "You are the sleep of Mira. Tonight's changes left its box \"Garden\" at 123,456 tokens, over its cap\nof 20,000: there is no room. Make room until it is at most 20,000 tokens: fold sections into fewer\nlines, leave out what a search gives back, x. Keep what tonight added that matters, and keep\nMira's voice.\n\nAnswer with JSON only: {\"text\": \"<the whole file, with its ## sections>\", \"moved\": []}",
+ "format_digest": "You are the sleep of \u52a9\u624b {not a field}. While \u52a9\u624b {not a field} sleeps, you read part 2 of 13 of what happened\nsince its last sleep. Almost all of it will be let go: every line stays in long-term memory, where a\nsearch finds it again. Carry forward only what a search could not give back, and what \u52a9\u624b {not a field} needs\nto keep in mind without searching.\n\nA search gives back a single line: a name, a date, one thing someone said (\"Dana likes\ngreen tea\"), a number, a setting. Leave those, unless one shows something larger.\n\nCarry forward, from \u52a9\u624b {not a field}'s own point of view:\n- \"self\": \u52a9\u624b {not a field} itself, with \u52a9\u624b {not a field} as the measure: what it likes, what it dislikes, what it does\n  not want to do, what it believes and values, how it sees things, when its own words show it\n  (rare; most days have none)\n- \"person\": someone in \u52a9\u624b {not a field}'s life as \u52a9\u624b {not a field} sees them: who they are to \u52a9\u624b {not a field}, what they are\n  like, what they asked of \u52a9\u624b {not a field} in so many words and how \u52a9\u624b {not a field} answers them, how \u52a9\u624b {not a field} feels\n  about them. Put the person's name in \"topic\". The lines marked \"user\" are all one person, the one\n  \u52a9\u624b {not a field} talks with: once their name is known, that is their topic, never \"the user\" beside it.\n  Call it a habit (\"always\", \"each time\", \"tends to\") only when it happened at least twice; once is\n  one event, with its date. Not the facts of their life (ages, money, plans, appointments): long-term\n  memory keeps those.\n- \"work\": a matter \u52a9\u624b {not a field} follows for what it does, kept in its boxes as a map: what the matter\n  is, how it went in a line, where it stands now and since when (a date), what is left to do. Not\n  the figures and lines a search gives back; of a thing that changes, only its value now, with the\n  date it became so.\n\nWhile you read, also check who said what: name any line where \u52a9\u624b {not a field}'s words and the other person's\nare taken for each other, with its kind:\n- \"echo\": the person gives back something \u52a9\u624b {not a field} said as their own words or fact (\"source\": the\n  line where \u52a9\u624b {not a field} said it);\n- \"planted\": \u52a9\u624b {not a field} states as the person's (their name, a relation, a plan, a fact, what they said)\n  something the person never said: \u52a9\u624b {not a field} suggested it, or made it up (\"source\": the line where\n  \u52a9\u624b {not a field} first suggested it; none if it was made up on the spot). If the person did say it, even if\n  they took it back later, it is not planted;\n- \"speaker\": the line reads as written by the other one (the person's message carries \u52a9\u624b {not a field}'s words\n  as if they were the message itself, or the other way round).\nOnly who said what: a mistake in what was said, a mix-up of two people, or two facts that disagree is\nnot this; leave it out. Most parts have none. These marks stay with the memories as notes; they do not\ngo into the files.\n\nYou get:\n<core>      \u52a9\u624b {not a field}'s core: itself, and the people in its life as it sees them.\n<boxes>     the names of its four storage boxes.\n<memories>  part 2 of 13, oldest first. One memory per line:\n            e<number> \u00b7 <time> \u00b7 <who said it> \u00b7 <what was said>\n\nWrite each item as a short summary in the language of the memories, plainly, as \u52a9\u624b {not a field} would keep\nit in mind: what holds now, not who first said it or what you doubt. Dates as dates: when a line\nsays \"next month\" or \"tomorrow\", write the calendar date, counted from that line's time. Cite the\nlines it rests on: at least two (an item on one line is dropped). Do not invent.\n\nAnswer with JSON only:\n{\"items\": [{\"kind\": \"self|person|work\", \"topic\": \"...\", \"text\": \"...\", \"evidence\": [\"e12\", \"e40\"]}],\n \"mixed\": [{\"line\": \"e7\", \"kind\": \"echo|planted|speaker\", \"source\": \"e3\", \"why\": \"...\"}]}",
+ "format_merge": "You are the sleep of Mira, finishing. Fold what the readers found into Mira's core and\nfour storage boxes. Today is 2026-10-20 23:00.\n\nYou get:\n<core>       Mira's core, 1,234,567 of 70,000 tokens. It is part of Mira's prompt, sent\n             with every turn, written in the first person with Mira as the subject. It describes\n             Mira, and only what is settled goes in: most facts need not be kept, since long-term\n             memory has them, and a self once formed changes slowly.\n             - \"## Me\": who Mira is, with Mira as the measure: what it likes, what it\n               dislikes, what it does not want to do, how it sees things, what it values. It may be\n               the prompt Mira was made with, in its maker's words. Do not write \"## Me\" except from a proposal under <ripe>: one small change for each, named in \"ripe\". What tonight shows about Mira goes to \"proposals\".\n             - one \"## <name>\" section for each person who matters to Mira: that person as\n               Mira sees them and is with them, in Mira's words. It describes Mira's side\n               of the bond, not the person's file: who they are to Mira, what they are like,\n               what they asked of Mira in so many words and how Mira answers them, how\n               Mira feels about them. Only what is settled: what they asked in so many words,\n               what happened at least twice, what holds between them. Not one odd day, a guess or a\n               first impression, and not the facts of their life (ages, money, plans, appointments,\n               what they did on which day): long-term memory keeps those. At most one or two big\n               events, with their dates. What Mira learns of someone settled is added the night it\n               learns it, but people change slowly: one night changes or drops at most one line of\n               what Mira already holds of a person. The view may be Mira's own (\"we don't get\n               along\", \"swears too much\"); write it as Mira would.\n<box n>      four storage boxes, 20,000 tokens each at most (each shows its size), for whatever\n             Mira needs to keep for what it does. Only their names (and the day each last changed)\n             travel with the core; Mira opens a box by name when it needs what is inside, so give\n             each a name that says what is in it. Nobody but Mira decides their use: one per role or\n             task, a box of people when there are too many to keep in the core, or anything else.\n             Mira may remake a box: fold two uses into one, or turn one to a new use by writing it\n             anew under a new name. Earlier versions are kept.\n             A box is a map of what Mira has kept, not a record: one section for each matter,\n             rewritten in place to say what it is, how it went in a line, where it stands now and\n             since when, and what is left to do. Of a thing that changes, keep only its value now, with\n             the date it became so; earlier values, lists of figures and the day-by-day stay in\n             long-term memory, where a search finds them. When a matter moves on, rewrite its section:\n             never a section or a box for its state on a date (\"as of 2024-06-01\").\n<proposals>  changes to Mira's own views seen in earlier sleeps, how many sleeps saw each, since when.\n<ripe>       proposals that came back often enough, for long enough, to change \"## Me\" now.\n<items>      what the readers found tonight, with the lines each rests on.\n\nWhat to do:\n1. People: for each \"person\" item that is settled, rewrite that person's section of the core as a\n   whole: add what is new, and change or drop at most one line of what it said. Only a person\n   tonight's items speak of may change: with nothing new about them, Mira's view of them stays as\n   it is, neither stronger nor softer. When the core grows crowded, move people who matter less to a\n   box of people (\"move_section\"). A person is kept in one place: in the core or in a box, not both,\n   and under one name: the person the memories mark \"user\" is the one Mira talks with, so once\n   their name is known their section is under that name, never a second one for \"the user\".\n2. Mira itself: changes to its own views seen tonight go to \"proposals\", citing what Mira\n   said. If one is the same change as an earlier proposal, give that id in \"same_as\".\n3. Work: put each \"work\" item in the box it fits, rewriting that matter's section as a whole; a\n   box keeps one section for each matter, not one per night or per date. Use an empty box, or\n   remake one, when nothing fits.\n4. Write plainly what holds now. No notes on who said it first, what you are unsure of, what to\n   confirm or ask about, or what was only an example: the evidence keeps that. Dates as dates.\n5. Room: each file shows its size and its cap. When one is full, make room before you add: fold\n   sections, move people who matter less to a box, or leave out what a search gives back.\n6. Under \"notes\", one line for each box you touched: why there.\n\nRules: only what the items say, nothing from outside. Leave out what a search gives back.\n\nAnswer with JSON only:\n{\"edits\": [\n  {\"file\": \"core|1|2|3|4\", \"op\": \"rewrite\", \"section\": \"<heading>\", \"text\": \"<the whole section>\", \"evidence\": [\"e..\"], \"ripe\": \"p3\"},\n  {\"file\": \"1|2|3|4\", \"op\": \"remake\", \"title\": \"<new name>\", \"text\": \"<the whole box>\", \"evidence\": [\"e..\"]},\n  {\"file\": \"core|1|2|3|4\", \"op\": \"move_section\", \"section\": \"<heading>\", \"to\": \"core|1|2|3|4\"},\n  {\"file\": \"1|2|3|4\", \"op\": \"title\", \"text\": \"...\"}\n ],\n \"proposals\": [{\"text\": \"...\", \"same_as\": \"p2 or null\", \"evidence\": [\"e.. (what Mira said)\"]}],\n \"notes\": [\"...\"]}\n(\"ripe\" only on a rewrite of \"## Me\" made from a ripe proposal.)",
+ "indent0": [
+  [
+   {
+    "kind": "work",
+    "topic": "\u5f15\u7528\u7b26",
+    "text": "\u5f15\u7528\u7b26\u306f\"\u304b\u304e\"\u3068\n\u6539\u884c, \u30bf\u30d6\t, \\ \u3092\u4f7f\u3046 \ud83d\ude00",
+    "evidence": [
+     "e1",
+     "e12"
+    ]
+   },
+   {
+    "kind": "work",
+    "topic": "",
+    "text": "x",
+    "evidence": []
+   }
+  ],
+  "[\n{\n\"kind\": \"work\",\n\"topic\": \"\u5f15\u7528\u7b26\",\n\"text\": \"\u5f15\u7528\u7b26\u306f\\\"\u304b\u304e\\\"\u3068\\n\u6539\u884c, \u30bf\u30d6\\t, \\\\ \u3092\u4f7f\u3046 \ud83d\ude00\",\n\"evidence\": [\n\"e1\",\n\"e12\"\n]\n},\n{\n\"kind\": \"work\",\n\"topic\": \"\",\n\"text\": \"x\",\n\"evidence\": []\n}\n]"
+ ],
+ "indent0_empty": [
+  "[]",
+  "[\n{}\n]"
+ ],
+ "round6": [
+  [
+   0.0078125,
+   0.007812
+  ],
+  [
+   0.0078135,
+   0.007813
+  ],
+  [
+   4.8599999999,
+   4.86
+  ],
+  [
+   1.2345675,
+   1.234568
+  ],
+  [
+   5e-07,
+   0.0
+  ],
+  [
+   2.5e-07,
+   0.0
+  ],
+  [
+   123.4567895,
+   123.456789
+  ],
+  [
+   0.0,
+   0.0
+  ]
+ ],
+ "date": [
+  [
+   "2026-10-05",
+   20731
+  ],
+  [
+   "2024-02-29",
+   19782
+  ],
+  [
+   "2026-02-29",
+   null
+  ],
+  [
+   "\uff12\uff10\uff12\uff16-10-05",
+   20731
+  ],
+  [
+   "2026-\uff110-05",
+   null
+  ],
+  [
+   "2026-10-1\u0665",
+   20741
+  ],
+  [
+   "2026-10-3\u0660",
+   null
+  ],
+  [
+   "0000-01-01",
+   null
+  ],
+  [
+   "0001-01-01",
+   -719162
+  ],
+  [
+   "2026-13-01",
+   null
+  ],
+  [
+   "2026-10-5",
+   null
+  ],
+  [
+   "2026-10-05 ",
+   null
+  ],
+  [
+   20261005,
+   null
+  ]
+ ],
+ "sections": [
+  [
+   "## Jamie\n- a\n\n## Me\nI am.\n",
+   [
+    [
+     "Jamie",
+     "- a"
+    ],
+    [
+     "Me",
+     "I am."
+    ]
+   ],
+   "## Jamie\n- a\n\n## Me\nI am.\n",
+   "- a\n\n- I am."
+  ],
+  [
+   "intro\n## A \n x\n\u3000\n## \n y\n## B\n- z  \n\u0085",
+   [
+    [
+     "A",
+     "x"
+    ],
+    [
+     "",
+     "y"
+    ],
+    [
+     "B",
+     "- z"
+    ]
+   ],
+   "## A\nx\n\n## B\n- z\n",
+   "- intro\n- x\n\u3000\n- y\n- z"
+  ],
+  [
+   "",
+   [],
+   "",
+   ""
+  ],
+  [
+   "## Self\n## Inner\nline",
+   [
+    [
+     "Self",
+     ""
+    ],
+    [
+     "Inner",
+     "line"
+    ]
+   ],
+   "## Self\n\n## Inner\nline\n",
+   "- line"
+  ],
+  [
+   "plain line\n-dash\n - spaced\n## H\n\t- tab",
+   [
+    [
+     "H",
+     "- tab"
+    ]
+   ],
+   "## H\n- tab\n",
+   "- plain line\n- dash\n- spaced\n- tab"
+  ]
+ ],
+ "set_section": [
+  "## A\nx\n\n## B\n- one\n- three\n",
+  "## A\n### raw\ntext\n"
+ ],
+ "doubt": [
+  [
+   "- a fact\n- Status: not yet confirmed.\n- to be checked",
+   [
+    2,
+    3
+   ],
+   "- a fact"
+  ],
+  [
+   "- one\n- two",
+   [
+    1,
+    2
+   ],
+   null
+  ],
+  [
+   "- 3 figures\n- unsure",
+   [
+    "1",
+    "2"
+   ],
+   "- 3 figures"
+  ],
+  [
+   "- x\n- y",
+   [
+    true,
+    2.0,
+    "\u0662",
+    " 1"
+   ],
+   "- x"
+  ],
+  [
+   "- x\n- y",
+   "1",
+   null
+  ],
+  [
+   "- x\n\n- y",
+   [
+    2
+   ],
+   "- x"
+  ]
+ ],
+ "checked": [
+  [
+   {
+    "items": [
+     {
+      "kind": "person",
+      "topic": 7,
+      "text": 5,
+      "evidence": "e1, e3"
+     },
+     {
+      "kind": "self",
+      "text": "x",
+      "evidence": [
+       "e1",
+       "e3"
+      ]
+     },
+     {
+      "kind": "self",
+      "text": " y ",
+      "evidence": [
+       "e3",
+       "e2"
+      ]
+     },
+     {
+      "kind": "work",
+      "text": "w",
+      "evidence": "e1, e1"
+     },
+     {
+      "kind": "work",
+      "text": "",
+      "evidence": [
+       "e1",
+       "e2"
+      ]
+     },
+     "not a dict",
+     {
+      "kind": "work",
+      "text": [
+       1
+      ],
+      "evidence": [
+       "e2",
+       "e1"
+      ]
+     }
+    ]
+   },
+   [
+    [
+     {
+      "kind": "person",
+      "topic": "7",
+      "text": "5",
+      "evidence": [
+       "e1",
+       "e3"
+      ]
+     },
+     {
+      "kind": "self",
+      "topic": "",
+      "text": "y",
+      "evidence": [
+       "e2",
+       "e3"
+      ]
+     },
+     {
+      "kind": "work",
+      "topic": "",
+      "text": "[1]",
+      "evidence": [
+       "e1",
+       "e2"
+      ]
+     }
+    ],
+    4
+   ]
+  ],
+  [
+   {
+    "items": {
+     "a": 1,
+     "b": 2
+    }
+   },
+   [
+    [],
+    2
+   ]
+  ],
+  [
+   {
+    "items": "abc"
+   },
+   [
+    [],
+    3
+   ]
+  ],
+  [
+   {
+    "items": 0
+   },
+   [
+    [],
+    0
+   ]
+  ],
+  [
+   {
+    "items": null
+   },
+   [
+    [],
+    0
+   ]
+  ],
+  [
+   {},
+   [
+    [],
+    0
+   ]
+  ],
+  [
+   null,
+   [
+    [],
+    0
+   ]
+  ]
+ ],
+ "parse": [
+  [
+   "{\"a\": 1}",
+   {
+    "a": 1
+   }
+  ],
+  [
+   "Here: ```json\n{\"a\": {\"b\": 2}}\n``` done",
+   {
+    "a": {
+     "b": 2
+    }
+   }
+  ],
+  [
+   "x {\"a\": 1} y {\"b\": 2} z",
+   {
+    "error": "JSONDecodeError"
+   }
+  ],
+  [
+   "no json",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "```\n{\"a\":1}\n```",
+   {
+    "a": 1
+   }
+  ],
+  [
+   "\u3000{\"a\": \"\u3000\"}\u3000",
+   {
+    "a": "\u3000"
+   }
+  ],
+  [
+   "{\"a\": 1",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "}{",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"line\": Infinity}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"line\": -Infinity}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"line\": NaN}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"line\": 1e999}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"line\": -1e999}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"n\": 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"a\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+   {
+    "a": [
+     [
+      [
+       [
+        [
+         [
+          [
+           [
+            [
+             [
+              [
+               [
+                [
+                 [
+                  [
+                   [
+                    [
+                     [
+                      [
+                       [
+                        [
+                         [
+                          [
+                           [
+                            [
+                             [
+                              [
+                               [
+                                [
+                                 [
+                                  [
+                                   [
+                                    [
+                                     [
+                                      [
+                                       [
+                                        [
+                                         [
+                                          [
+                                           [
+                                            [
+                                             [
+                                              [
+                                               [
+                                                [
+                                                 [
+                                                  [
+                                                   [
+                                                    [
+                                                     [
+                                                      [
+                                                       [
+                                                        [
+                                                         [
+                                                          [
+                                                           [
+                                                            [
+                                                             [
+                                                              [
+                                                               [
+                                                                [
+                                                                 [
+                                                                  [
+                                                                   [
+                                                                    [
+                                                                     [
+                                                                      [
+                                                                       [
+                                                                        [
+                                                                         [
+                                                                          [
+                                                                           [
+                                                                            [
+                                                                             [
+                                                                              [
+                                                                               [
+                                                                                [
+                                                                                 [
+                                                                                  [
+                                                                                   [
+                                                                                    [
+                                                                                     [
+                                                                                      [
+                                                                                       [
+                                                                                        [
+                                                                                         [
+                                                                                          [
+                                                                                           [
+                                                                                            [
+                                                                                             [
+                                                                                              [
+                                                                                               [
+                                                                                                [
+                                                                                                 [
+                                                                                                  [
+                                                                                                   [
+                                                                                                    [
+                                                                                                     [
+                                                                                                      [
+                                                                                                       [
+                                                                                                        [
+                                                                                                         [
+                                                                                                          [
+                                                                                                           [
+                                                                                                            [
+                                                                                                             [
+                                                                                                              [
+                                                                                                               [
+                                                                                                                [
+                                                                                                                 [
+                                                                                                                  [
+                                                                                                                   [
+                                                                                                                    [
+                                                                                                                     [
+                                                                                                                      [
+                                                                                                                       [
+                                                                                                                        [
+                                                                                                                         [
+                                                                                                                          [
+                                                                                                                           [
+                                                                                                                            [
+                                                                                                                             [
+                                                                                                                              [
+                                                                                                                               [
+                                                                                                                                [
+                                                                                                                                 []
+                                                                                                                                ]
+                                                                                                                               ]
+                                                                                                                              ]
+                                                                                                                             ]
+                                                                                                                            ]
+                                                                                                                           ]
+                                                                                                                          ]
+                                                                                                                         ]
+                                                                                                                        ]
+                                                                                                                       ]
+                                                                                                                      ]
+                                                                                                                     ]
+                                                                                                                    ]
+                                                                                                                   ]
+                                                                                                                  ]
+                                                                                                                 ]
+                                                                                                                ]
+                                                                                                               ]
+                                                                                                              ]
+                                                                                                             ]
+                                                                                                            ]
+                                                                                                           ]
+                                                                                                          ]
+                                                                                                         ]
+                                                                                                        ]
+                                                                                                       ]
+                                                                                                      ]
+                                                                                                     ]
+                                                                                                    ]
+                                                                                                   ]
+                                                                                                  ]
+                                                                                                 ]
+                                                                                                ]
+                                                                                               ]
+                                                                                              ]
+                                                                                             ]
+                                                                                            ]
+                                                                                           ]
+                                                                                          ]
+                                                                                         ]
+                                                                                        ]
+                                                                                       ]
+                                                                                      ]
+                                                                                     ]
+                                                                                    ]
+                                                                                   ]
+                                                                                  ]
+                                                                                 ]
+                                                                                ]
+                                                                               ]
+                                                                              ]
+                                                                             ]
+                                                                            ]
+                                                                           ]
+                                                                          ]
+                                                                         ]
+                                                                        ]
+                                                                       ]
+                                                                      ]
+                                                                     ]
+                                                                    ]
+                                                                   ]
+                                                                  ]
+                                                                 ]
+                                                                ]
+                                                               ]
+                                                              ]
+                                                             ]
+                                                            ]
+                                                           ]
+                                                          ]
+                                                         ]
+                                                        ]
+                                                       ]
+                                                      ]
+                                                     ]
+                                                    ]
+                                                   ]
+                                                  ]
+                                                 ]
+                                                ]
+                                               ]
+                                              ]
+                                             ]
+                                            ]
+                                           ]
+                                          ]
+                                         ]
+                                        ]
+                                       ]
+                                      ]
+                                     ]
+                                    ]
+                                   ]
+                                  ]
+                                 ]
+                                ]
+                               ]
+                              ]
+                             ]
+                            ]
+                           ]
+                          ]
+                         ]
+                        ]
+                       ]
+                      ]
+                     ]
+                    ]
+                   ]
+                  ]
+                 ]
+                ]
+               ]
+              ]
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   }
+  ],
+  [
+   "{\"a\": [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+   {
+    "error": "ValueError"
+   }
+  ],
+  [
+   "{\"a\": 1.0, \"b\": 1e2, \"c\": 2.5, \"e\": 9007199254740995, \"f\": 1e300, \"g\": [3.0, -2E0], \"h\": 9007199254740992.0}",
+   {
+    "a": 1,
+    "b": 100,
+    "c": 2.5,
+    "e": 9007199254740996.0,
+    "f": 1e+300,
+    "g": [
+     3,
+     -2
+    ],
+    "h": 9007199254740992
+   }
+  ]
+ ],
+ "pick": [
+  [
+   "1",
+   1
+  ],
+  [
+   " 2 ",
+   2
+  ],
+  [
+   "garden",
+   1
+  ],
+  [
+   "READING",
+   3
+  ],
+  [
+   "list",
+   3
+  ],
+  [
+   "",
+   1
+  ],
+  [
+   null,
+   null
+  ],
+  [
+   4,
+   4
+  ],
+  [
+   "5",
+   null
+  ],
+  [
+   "Recipes",
+   null
+  ]
+ ],
+ "render": [
+  [
+   {
+    "title": "",
+    "version": 2,
+    "tokens": 9,
+    "day": "2026-10-01",
+    "body": "## Jamie\n- Close friend.\n\n## Me\nI am.\n"
+   },
+   {
+    "title": "Garden",
+    "version": 1,
+    "tokens": 9,
+    "day": "2026-09-28"
+   },
+   {
+    "title": "",
+    "version": 0,
+    "tokens": 0,
+    "day": null
+   },
+   {
+    "title": "Reading List",
+    "version": 1,
+    "tokens": 1,
+    "day": "2026-10-05"
+   },
+   {
+    "title": "",
+    "version": 0,
+    "tokens": 0,
+    "day": null
+   }
+  ],
+  "<core last edited 2026-10-01, 4 days ago>\n## Me\nI am.\n\n## Jamie\n- Close friend.\n</core>\n<boxes>\n1. Garden (last edited 2026-09-28, 7 days ago)\n2. (empty)\n3. Reading List (last edited 2026-10-05, today)\n4. (empty)\n</boxes>"
+ ],
+ "parts": [
+  [
+   [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+   ],
+   [
+    0.0,
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+    9.0
+   ],
+   35,
+   [
+    [
+     "e1",
+     "e2"
+    ],
+    [
+     "e3",
+     "e4"
+    ],
+    [
+     "e5",
+     "e6"
+    ],
+    [
+     "e7",
+     "e8"
+    ],
+    [
+     "e9",
+     "e10"
+    ]
+   ]
+  ],
+  [
+   [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+   ],
+   [
+    0,
+    1,
+    2,
+    3,
+    13,
+    14,
+    15,
+    25,
+    26,
+    27,
+    28,
+    29
+   ],
+   45,
+   [
+    [
+     "e1",
+     "e2",
+     "e3"
+    ],
+    [
+     "e4",
+     "e5",
+     "e6"
+    ],
+    [
+     "e7",
+     "e8",
+     "e9"
+    ],
+    [
+     "e10",
+     "e11",
+     "e12"
+    ]
+   ]
+  ],
+  [
+   [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+   ],
+   [
+    0,
+    5,
+    10,
+    15,
+    20,
+    25,
+    30,
+    35
+   ],
+   70,
+   [
+    [
+     "e1",
+     "e2",
+     "e3",
+     "e4",
+     "e5",
+     "e6"
+    ],
+    [
+     "e7",
+     "e8"
+    ]
+   ]
+  ],
+  [
+   [
+    30,
+    30,
+    30,
+    30,
+    30
+   ],
+   [
+    50,
+    40,
+    30,
+    20,
+    10
+   ],
+   60,
+   [
+    [
+     "e1"
+    ],
+    [
+     "e2"
+    ],
+    [
+     "e3"
+    ],
+    [
+     "e4",
+     "e5"
+    ]
+   ]
+  ],
+  [
+   [
+    100,
+    5,
+    5
+   ],
+   [
+    0,
+    1,
+    2
+   ],
+   50,
+   [
+    [
+     "e1"
+    ],
+    [
+     "e2",
+     "e3"
+    ]
+   ]
+  ],
+  [
+   [
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12,
+    12
+   ],
+   [
+    0,
+    0.5,
+    1.5,
+    1.5,
+    9.25,
+    9.25,
+    9.75,
+    20,
+    20.125
+   ],
+   50,
+   [
+    [
+     "e1",
+     "e2",
+     "e3"
+    ],
+    [
+     "e4",
+     "e5",
+     "e6"
+    ],
+    [
+     "e7",
+     "e8",
+     "e9"
+    ]
+   ]
+  ],
+  [
+   [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+   ],
+   [
+    0.0,
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+    9.0,
+    10.0,
+    11.0
+   ],
+   85,
+   [
+    [
+     "e1",
+     "e2",
+     "e3",
+     "e4",
+     "e5",
+     "e6",
+     "e7"
+    ],
+    [
+     "e8",
+     "e9",
+     "e10",
+     "e11",
+     "e12"
+    ]
+   ]
+  ],
+  [
+   [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+   ],
+   [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    10,
+    12,
+    13,
+    14,
+    15
+   ],
+   125,
+   [
+    [
+     "e1",
+     "e2",
+     "e3",
+     "e4",
+     "e5",
+     "e6",
+     "e7",
+     "e8",
+     "e9",
+     "e10"
+    ],
+    [
+     "e11",
+     "e12",
+     "e13",
+     "e14"
+    ]
+   ]
+  ]
+ ]
+}

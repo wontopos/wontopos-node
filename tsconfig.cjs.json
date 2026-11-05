@@ -1,0 +1,14 @@
+// A second emit of the same source as CommonJS. dist/cjs/package.json (written by the
+// build) marks it commonjs, since the root package.json says "module".
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    // null clears the base config's "bundler" (which needs an ES module target) and
+    // takes the compiler's own default for commonjs, which TS 5, 6 and 7 all accept.
+    "moduleResolution": null,
+    "outDir": "./dist/cjs",
+    // One set of types, emitted by the ESM build. Two would drift.
+    "declaration": false
+  }
+}
