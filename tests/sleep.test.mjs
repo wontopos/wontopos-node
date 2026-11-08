@@ -484,7 +484,7 @@ test("sleep: the texts the model reads are the Python sleep's bytes", () => {
   for (const [name, want] of Object.entries(PROMPT_DIGESTS)) assert.equal(sha256(sleep[name]), want, name);
   assert.equal(sha256(pyDumps(sleep.SLEEP_OPEN_BOX)), OPEN_BOX_DIGEST, "open_box");
   assert.equal(sleep.SLEEP_NOT_JSON, "\n\nYour last answer was not valid JSON. Answer with the JSON object only.");
-  assert.equal(SLEEP_VERSION, "1.0.0");
+  assert.equal(SLEEP_VERSION, "1.0.1");
   assert.equal(sleep.SLEEP_VERSION, SLEEP_VERSION);
 });
 
@@ -711,7 +711,7 @@ test("sleep: one night asks the service in this order", async (t) => {
   assert.equal(res.done.changed, true);
   assert.deepEqual([res.sleep_id, res.memories, res.today], ["s-1", 20, "2026-09-15 23:00"]);
   assert.equal(res.llm_in, res.log.filter((x) => "in" in x).reduce((n, x) => n + x.in, 0));
-  assert.deepEqual([res.sleep_version, SLEEP_VERSION], ["1.0.0", "1.0.0"]);
+  assert.deepEqual([res.sleep_version, SLEEP_VERSION], ["1.0.1", "1.0.1"]);
   assert.ok(res.llm_out > 0);
 });
 
@@ -877,6 +877,38 @@ test("sleep: aborting the client's signal ends the wait before a retry, and no c
   assert.ok(Date.now() - t0 < 10_000, "the 60 s wait ended with the abort");
   assert.equal(model.calls.length, 1);
   assert.ok(!paths(svc).includes("self/write"));
+});
+
+test("sleep: a call that ignores its signal is raced against its 600 s deadline, and tried twice more", { timeout: 20_000 }, async (t) => {
+  const [svc, mem] = await served(t);
+  svc.give(nightRows(1, DAYS[1]));
+  let ticking = true;
+  t.after(() => {
+    ticking = false;
+  });
+  const spin = () => {
+    if (!ticking) return;
+    t.mock.timers.tick(100_000);
+    setImmediate(spin);
+  };
+  const calls = [];
+  const deaf = (c) => {
+    calls.push(c);
+    setImmediate(spin);
+    return new Promise(() => {});
+  };
+  let faked = false;
+  const countTokens = (text) => {
+    if (!faked) {
+      faked = true;
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+    }
+    return tok(text);
+  };
+  await assert.rejects(nap(mem, undefined, { llm: deaf, today: "2026-09-15 23:00", countTokens }),
+    (e) => e.name === "TimeoutError" && e.message === "the sleep's model call ran past 600 s");
+  ticking = false;
+  assert.equal(calls.length, 3, "raced at its deadline, and tried twice more");
 });
 
 test("sleep: mergeLlm writes, and an async caller is awaited like a plain one", async (t) => {
@@ -1091,7 +1123,7 @@ test("sleep: a line with no speaker in a night of two people is a person's, mark
   assert.deepEqual(who, ["Dana", "user", "Mina", "Kai", "Kai"]);
 });
 
-const BASIS = { sleep_version: "1.0.0", model: "claude-sonnet-5-5", effort: "high", prompt_caching: false, margin: 0.15 };
+const BASIS = { sleep_version: "1.0.1", model: "claude-sonnet-5-5", effort: "high", prompt_caching: false, margin: 0.15 };
 const PY_ESTIMATES = {
   priced: { sleep_id: "s-1", memories: 20, tokens: 460, parts: 1, readers: 1, input_tokens: 2219, output_tokens: 33, cost: 0.002742, basis: { ...BASIS, prices: [1, 5] }, sleepy: false },
   none: { sleep_id: "s-2", memories: 0, tokens: 0, parts: 0, readers: 0, input_tokens: 0, output_tokens: 0, cost: 0, basis: { ...BASIS, prices: [2, 10] }, sleepy: false },
@@ -1292,7 +1324,7 @@ test("sleep: memory tools with sleep off are the tools without it, to the byte",
       }
     }
   }
-  const tools = mem.memoryTools("u");
+  const tools = mem.memoryTools("u", { preset: "S-2" });
   assert.ok(!tools.definitions().map((d) => d.name).includes("open_box"));
   await assert.rejects(tools.run({ name: "open_box", input: { box: "1" } }), /not a memory tool/);
   await assert.rejects(tools.load(), /make the tools with sleep: true/);
@@ -1302,7 +1334,7 @@ test("sleep: memory tools with sleep off are the tools without it, to the byte",
 
 test("sleep: memory tools with sleep carry the core, the boxes and the reader note", async (t) => {
   const [svc, mem] = await served(t, filesService(), { model: "scroll-2" });
-  const tools = mem.memoryTools("u", { sleep: true, today: "2026-10-05" });
+  const tools = mem.memoryTools("u", { preset: "S-2", sleep: true, today: "2026-10-05" });
   const base = mem.memoryTools("u").note;
   assert.throws(() => tools.note, /not read yet/);
   await tools.load();
@@ -1355,7 +1387,7 @@ test("sleep: memory tools with sleep carry the core, the boxes and the reader no
 
 test("sleep: memory tools with sleep read the files at the first turn and date them on the clock", async (t) => {
   const [svc, mem] = await served(t, filesService(), { model: "scroll-2" });
-  const tools = mem.memoryTools("u", { sleep: true, tz: -12 });
+  const tools = mem.memoryTools("u", { preset: "S-2", sleep: true, tz: -12 });
   await tools.begin("q");
   assert.deepEqual(paths(svc), ["self", "work/open"]);
   assert.ok(tools.note.includes("<core last edited 2026-10-01, "));
@@ -1379,7 +1411,7 @@ test("sleep: sleep.js ships beside both builds, with only its public names in th
   }
   const dts = read("../dist/sleep.d.ts");
   assert.equal(read("../dist/cjs/sleep.d.ts"), dts, "the CJS types carry the same declarations");
-  assert.match(dts, /export declare const SLEEP_VERSION = "1\.0\.0";/);
+  assert.match(dts, /export declare const SLEEP_VERSION = "1\.0\.1";/);
   assert.match(dts, /export declare class SleepSettings/);
   assert.match(dts, /export interface SleepSettingsOptions/);
   for (const internal of ["sleepFlow", "SLEEP_DIGEST", "SleepHost", "sleepTokens", "SLEEP_PYTHON"]) {
@@ -1391,12 +1423,59 @@ test("sleep: sleep.js ships beside both builds, with only its public names in th
   }
 });
 
-test("a proposal the sleep cannot read is left out of its notes", () => {
+test("a proposal the sleep cannot read is left out of its work, and kept in its notes as it was", () => {
   const good = { id: "p1", text: "short answers", sleeps: 2, first: 1.5, first_day: "2026-10-01" };
   const bad = [{ id: "p2", text: "x", first_day: "d", first: 1 }, { id: "p3", text: "x", sleeps: 1, first: 1 },
     { id: "p4", text: "x", sleeps: "2", first: 1, first_day: "d" }, { id: "p5", text: "x", sleeps: 0, first: 1, first_day: "d" },
     { id: "p6", text: "x", sleeps: 1, first: true, first_day: "d" }, "p7", null];
   const [version, notes] = sleep.SLEEP_PYTHON.sleepNotesOf({ version: 3, notes: { proposals: [good, ...bad], mixed: [] } });
   assert.equal(version, 3);
-  assert.deepEqual(notes.proposals, [good]);
+  assert.deepEqual(notes.proposals, [good, ...bad]);
+  assert.deepEqual(notes.proposals.filter(sleep.SLEEP_PYTHON.sleepReadable), [good]);
+});
+
+const proposalOf = (id, text, applied) => ({ id, text, sleeps: 1, first: 1, first_day: "d", ...(applied ? { applied: "d" } : {}) });
+const markOf = (memory, why) => ({ memory, why });
+const NOTES_FIT = [
+  [{ proposals: [proposalOf("p1", "a", true)], mixed: [markOf("m-1", "w")] }, ["p1"], ["m-1"]],
+  [{ proposals: [proposalOf("p1", "a".repeat(60_000), true), proposalOf("p2", "b".repeat(60_000), false), proposalOf("p3", "c".repeat(60_000), true),
+    proposalOf("p4", "d", true), { id: "p5", text: "e".repeat(60_000), applied: "d" }],
+  mixed: [markOf("m-1", "x".repeat(20_000)), markOf("m-2", "y")] }, ["p2", "p4", "p5"], ["m-1", "m-2"]],
+  [{ proposals: [proposalOf("p1", "a".repeat(60_000), true), proposalOf("p2", "b".repeat(150_000), false)],
+    mixed: [markOf("m-1", "x".repeat(60_000)), markOf("m-2", "y")] }, ["p2"], ["m-2"]],
+  [{ proposals: [proposalOf("p1", "b".repeat(250_000), false)], mixed: [markOf("m-1", "y"), markOf("m-2", "z")] }, ["p1"], []],
+];
+
+test("over their cap the notes drop the oldest applied proposals, then the oldest marks, never an open one", () => {
+  for (const [given, proposals, marks] of NOTES_FIT) {
+    const notes = structuredClone(given);
+    sleep.SLEEP_PYTHON.sleepNotesFit(notes);
+    assert.deepEqual([notes.proposals.map((p) => p.id), notes.mixed.map((m) => m.memory)], [proposals, marks]);
+  }
+});
+
+test("open_box takes a box by its number or whole name before part of one, and never by a blank", () => {
+  const view = ["", "Notes on work", "Work", "", "WORK"].map((title) => ({ title, version: 0, tokens: 0, day: null }));
+  for (const [which, want] of [["", null], ["   ", null], [null, null], ["Work", 2], ["work", 2], ["WORK", 4], ["notes", 1], ["on wo", 1],
+    ["2", 2], [" 4 ", 4], ["3", 3], [3, 3], ["5", null], ["Recipes", null]]) {
+    assert.equal(sleep.SLEEP_PYTHON.sleepBoxPick(view, which) ?? null, want, JSON.stringify(which));
+  }
+});
+
+test("the sleep finds fenced JSON in one pass, with the same result as before", () => {
+  const p = sleep.SLEEP_PYTHON;
+  for (const [text, want] of [
+    ['Here: ```json\n{"a": {"b": 2}}\n``` done', { a: { b: 2 } }],
+    ['```\n{"a": 1}\n``` and ```json {"b": 2} ```', null],
+    ['````{"a": 1}```', { a: 1 }],
+    ['```json\n{"a": 1}\n``` then {"b": 2}', { a: 1 }],
+    ['```{"a": 1} no fence after it, {"b": 2}', null],
+    ['x {"a": "}```"} y', { a: "}```" }],
+  ]) {
+    if (want === null) assert.throws(() => p.sleepParseJson(text), undefined, text);
+    else assert.deepEqual(p.sleepParseJson(text), want, text);
+  }
+  const t0 = Date.now();
+  assert.throws(() => p.sleepParseJson("```{}x".repeat(50_000)));
+  assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0}ms`);
 });

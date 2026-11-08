@@ -4,7 +4,7 @@ import type {
 } from "./wontopos.js";
 
 /** The version of the sleep's texts, steps and rules. */
-export const SLEEP_VERSION = "1.0.0";
+export const SLEEP_VERSION = "1.0.1";
 
 /** @internal */
 export const SLEEP_DIGEST = `You are the sleep of {being}. While {being} sleeps, you read part {k} of {n} of what happened
@@ -706,12 +706,61 @@ function sleepParts(mems: SleepLine[], limit: number): SleepLine[][] {
   return out;
 }
 
+const SLEEP_BREAK = /\r\n|[\r\n\u0085\u{2028}\u{2029}]/gu;
+const SLEEP_CONTROL = /\r\n|[\u0000-\u001f\u007f-\u009f\u{2028}\u{2029}]/gu;
+const SLEEP_CONTROL_IN = /[\u0000-\u001f\u007f-\u009f\u{2028}\u{2029}]/u;
+const SLEEP_TAG = /<(?=\/?(?:memories|core|boxes|box|proposals|ripe|items|section|tonight|as it stood))/g;
+
+function sleepUntag(text: string): string {
+  return text.replace(SLEEP_TAG, "\u{2039}");
+}
+
+function sleepShown(text: string): string {
+  return sleepUntag(text.replace(SLEEP_BREAK, "\n    "));
+}
+
 function sleepLines(mems: SleepLine[]): string {
-  return mems.map((m) => `${m.eid} · ${m.at} · ${m.who} · ${m.text}`).join("\n");
+  return mems.map((m) => `${m.eid} · ${m.at} · ${sleepUntag(m.who.replace(SLEEP_CONTROL, " "))} · ${sleepShown(m.text)}`).join("\n");
+}
+
+function sleepHeading(text: string): string {
+  return pyStrip(pyLstrip(pyStrip(text), "#"));
+}
+
+function sleepHeadingBroken(e: Record<string, unknown>): boolean {
+  const named = [sleepHeading(pyStr(pyOr(e.section, ""))), pyStrip(pyStr(pyOr(e.title, "")))];
+  if (e.op === "title") named.push(pyStrip(pyStr(pyOr(e.text, ""))));
+  if (e.op === "remake") named.push(...sleepSections(pyStrip(pyStr(pyOr(e.text, "")))).map(([h]) => h));
+  return named.some((x) => SLEEP_CONTROL_IN.test(x));
+}
+
+function sleepSpeaksOf(topic: string, name: string): boolean {
+  if (!topic || !name) return false;
+  return topic === name || (Array.from(name).length >= 2 && topic.startsWith(name)) ||
+    (Array.from(topic).length >= 3 && name.startsWith(topic));
 }
 
 const PY_WS = "[\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]";
-const JSON_FENCE = new RegExp(`\`\`\`(?:json)?${PY_WS}*(\\{[\\s\\S]*\\})${PY_WS}*\`\`\``);
+const PY_WS_CHAR = new RegExp(`^${PY_WS}$`);
+
+function sleepFenced(t: string): string | undefined {
+  let last = -1;
+  let fence = false;
+  for (let i = t.length - 1; i >= 0; i--) {
+    if (t[i] === "}" && fence) {
+      last = i;
+      break;
+    }
+    fence = t.startsWith("```", i) || (fence && PY_WS_CHAR.test(t[i]));
+  }
+  for (let i = t.indexOf("```"); i >= 0; i = t.indexOf("```", i + 1)) {
+    let q = i + 3;
+    if (t.startsWith("json", q)) q += 4;
+    while (q < t.length && PY_WS_CHAR.test(t[q])) q++;
+    if (t.startsWith("{", q)) return last > q ? t.slice(q, last + 1) : undefined;
+  }
+  return undefined;
+}
 
 /** @internal */
 export function nestsDeeper(v: unknown, levels: number): boolean {
@@ -731,8 +780,8 @@ export function parseFiniteJson(text: string): unknown {
 
 function sleepParseJson(text: string): unknown {
   let t = pyStrip(text);
-  const m = JSON_FENCE.exec(t);
-  if (m) t = m[1];
+  const fenced = sleepFenced(t);
+  if (fenced !== undefined) t = fenced;
   const i = t.indexOf("{");
   const j = t.lastIndexOf("}");
   if (i < 0 || j < i) throw new Error("no JSON object in the answer");
@@ -763,7 +812,7 @@ function sleepAsLines(text: string): string {
 }
 
 function sleepSetSection(body: string, heading: string, text: string, raw = false): string {
-  const name = pyStrip(pyLstrip(pyStrip(heading), "#"));
+  const name = sleepHeading(heading);
   const t = raw ? sleepDemote(pyStrip(text)) : sleepAsLines(text);
   const secs = sleepSections(body);
   const i = secs.findIndex(([h]) => h === name);
@@ -840,11 +889,11 @@ export function sleepRender(view: SleepViewFile[], today: number): string {
 /** @internal */
 export function sleepBoxPick(view: SleepViewFile[], which: unknown): number | undefined {
   const w = pyStrip(pyStr(which));
-  for (const s of SLEEP_BOXES) {
-    const title = view[s].title;
-    if (w === String(s) || w === title || (title && title.toLowerCase().includes(w.toLowerCase()))) return s;
-  }
-  return undefined;
+  if (!w) return undefined;
+  const lower = w.toLowerCase();
+  return SLEEP_BOXES.find((s) => w === String(s) || w === view[s].title) ??
+    SLEEP_BOXES.find((s) => view[s].title && view[s].title.toLowerCase() === lower) ??
+    SLEEP_BOXES.find((s) => view[s].title && view[s].title.toLowerCase().includes(lower));
 }
 
 /** @internal */
@@ -914,10 +963,42 @@ function sleepNotesOf(r: unknown): [number, SleepNotesHeld] {
   const v = Object.prototype.hasOwnProperty.call(o, "version") ? o.version : o.notes_version;
   const notes = (isPlainObject(o.notes) ? JSON.parse(JSON.stringify(o.notes)) : {}) as SleepNotesHeld;
   for (const k of ["proposals", "mixed"] as const) if (!Array.isArray(notes[k])) notes[k] = [];
-  notes.proposals = notes.proposals.filter((p: unknown) =>
-    isPlainObject(p) && ["id", "text", "first_day"].every((k) => Object.prototype.hasOwnProperty.call(p, k)) &&
-    isWhole(p.sleeps) && p.sleeps >= 1 && typeof p.first === "number" && Number.isFinite(p.first));
   return [isWhole(v) && v >= 0 ? v : 0, notes];
+}
+
+function sleepReadable(p: unknown): p is SleepProposal {
+  return isPlainObject(p) && ["id", "text", "first_day"].every((k) => Object.prototype.hasOwnProperty.call(p, k)) &&
+    isWhole(p.sleeps) && p.sleeps >= 1 && typeof p.first === "number" && Number.isFinite(p.first);
+}
+
+const SLEEP_NOTES_CAP = 200_000;
+
+function sleepNextId(entries: unknown[]): string {
+  let top = 0;
+  for (const p of entries) {
+    const m = isPlainObject(p) && typeof p.id === "string" ? /^p([0-9]{1,9})$/.exec(p.id) : null;
+    if (m) top = Math.max(top, Number(m[1]));
+  }
+  return `p${top + 1}`;
+}
+
+function sleepSize(v: unknown): number {
+  if (typeof v === "string") return new TextEncoder().encode(v).length + 2;
+  if (Array.isArray(v)) return 2 + v.reduce((n: number, x) => n + sleepSize(x) + 1, 0);
+  if (isPlainObject(v)) return 2 + Object.entries(v).reduce((n, [k, x]) => n + sleepSize(k) + sleepSize(x) + 2, 0);
+  return 8;
+}
+
+function sleepNotesFit(notes: SleepNotesHeld): void {
+  let size = sleepSize(notes);
+  for (const key of ["proposals", "mixed"] as const) {
+    const keep: unknown[] = [];
+    for (const x of notes[key] as unknown[]) {
+      if (size > SLEEP_NOTES_CAP && (key === "mixed" || (sleepReadable(x) && pyTruthy(x.applied)))) size -= sleepSize(x) + 1;
+      else keep.push(x);
+    }
+    (notes as Record<string, unknown>)[key] = keep;
+  }
 }
 
 interface SleepWrite {
@@ -1038,6 +1119,7 @@ type SleepMark = { memory: string; at: string; kind: string; source_memory: stri
 function sleepCheckedMixed(got: unknown, part: SleepLine[]): [SleepMark[], number] {
   const pos = new Map(part.map((m, i) => [m.eid, i]));
   const mixed: SleepMark[] = [];
+  const keys = new Set<string>();
   let dropped = 0;
   for (const x of pyIter(isPlainObject(got) ? pyOr(got.mixed, []) : [])) {
     const line = isPlainObject(x) ? pyStr(x.line) : "";
@@ -1050,10 +1132,12 @@ function sleepCheckedMixed(got: unknown, part: SleepLine[]): [SleepMark[], numbe
     const at = part[pos.get(line) as number];
     const mine = at.mine;
     const fromMe = src !== "" && part[pos.get(src) as number].mine;
-    if ((x.kind === "echo" && (mine || (src !== "" && !fromMe))) || (x.kind === "planted" && (!mine || (src !== "" && !fromMe)))) {
+    if ((x.kind === "echo" && (mine || (src !== "" && !fromMe))) || (x.kind === "planted" && (!mine || (src !== "" && !fromMe))) ||
+      keys.has(JSON.stringify([line, x.kind, src]))) {
       dropped++;
       continue;
     }
+    keys.add(JSON.stringify([line, x.kind, src]));
     mixed.push({
       memory: at.mid, at: at.at, kind: x.kind, source_memory: src ? part[pos.get(src) as number].mid : null,
       why: cpSlice(pyStr(pyOr(x.why, "")), 0, 300),
@@ -1176,6 +1260,18 @@ function sleepTimeout(): Error {
   return e;
 }
 
+function sleepRaced<T>(call: () => T | Promise<T>, signal: AbortSignalLike): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const stop = (): void => reject(signal.reason);
+    if (signal.aborted) {
+      stop();
+      return;
+    }
+    signal.addEventListener("abort", stop, { once: true });
+    Promise.resolve().then(call).then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+  });
+}
+
 function sleepAsker(host: SleepHost, caller: ModelCaller, model: string, maxTokens: number): SleepAsk {
   return async (system, user) => {
     for (let attempt = 0; ;) {
@@ -1184,7 +1280,7 @@ function sleepAsker(host: SleepHost, caller: ModelCaller, model: string, maxToke
       const call = sleepCallSignal(host.signal);
       try {
         const c: ModelCall = { purpose: "sleep", model, system: [system], user, maxTokens, signal: call.signal };
-        reply = sleepReply(await caller.call(c));
+        reply = sleepReply(await sleepRaced(() => caller.call(c), call.signal));
       } catch (caught) {
         const e = call.timedOut() ? sleepTimeout() : caught;
         const wait = host.signal.aborted ? undefined : sleepRetryWait(e, attempt, host);
@@ -1293,7 +1389,7 @@ async function sleepReadFlow(host: SleepHost, run: SleepRun): Promise<[Record<st
 }
 
 async function sleepReadParts(run: SleepRun, mems: SleepLine[], core: string,
-  titles: string): Promise<[SleepLine[][], SleepItem[][], number, SleepMark[]]> {
+  titles: string): Promise<[SleepLine[][], SleepItem[][], number, SleepMark[], number[]]> {
   const parts = sleepParts(mems, run.s.partTokens);
   const many = sleepManyPeople(mems);
   const read = async (k: number, part: SleepLine[]): Promise<[SleepItem[], number, SleepMark[], number | undefined]> => {
@@ -1322,7 +1418,7 @@ async function sleepReadParts(run: SleepRun, mems: SleepLine[], core: string,
     if (failed) unread.push(failed);
   }
   run.log.push({ call: "unread parts", parts: unread });
-  return [parts, lists, dropped, mixed];
+  return [parts, lists, dropped, mixed, unread];
 }
 
 async function sleepCombine(run: SleepRun, g: SleepItem[][], rounds: number, knownAll: Set<string>, saidAll: Set<string>): Promise<SleepItem[]> {
@@ -1373,52 +1469,73 @@ interface SleepFileState {
 type SleepRefusal = { edit?: unknown; proposal?: unknown; why: string };
 type SleepRoomMade = { file: number; before: number; after: number | null };
 
+function sleepWhere(next: SleepFileState[], k: number): string {
+  return k === 0 ? "core" : `box "${next[k].title}"`;
+}
+
+function sleepCap(s: SleepSettings, k: number): number {
+  return k === 0 ? s.coreTokens : s.boxTokens;
+}
+
+type SleepCarried = [number, number, string, string][];
+
+function sleepPutBack(next: SleepFileState[], files: SleepFileState[], k: number, carried: SleepCarried): void {
+  next[k] = { ...files[k] };
+  for (const [src, dst, sec, text] of carried) {
+    if (dst === k && [src, k].every((j) => !sectionMap(next[j].body).has(sec))) {
+      next[src].body = sleepSetSection(next[src].body, sec, text, true);
+    }
+  }
+}
+
 async function sleepRoom(run: SleepRun, next: SleepFileState[], files: SleepFileState[], k: number, usedNow: number,
-  cap: number, rooms: SleepRoomMade[], refused: SleepRefusal[], why?: string): Promise<void> {
+  cap: number, rooms: SleepRoomMade[], refused: SleepRefusal[], carried: SleepCarried, why?: string): Promise<void> {
   const me = SLEEP_ME;
-  const where = k === 0 ? "core" : `box "${next[k].title}"`;
+  const where = sleepWhere(next, k);
   const coreWay = k === 0 ? ', or move people who matter less to a box (say which, under "moved")' : "";
   const moved = k === 0 ? ', "moved": [{"section": "<heading>", "to": "1|2|3|4"}]' : "";
   const g = (await sleepAskJson(run.merge, pyFormat(SLEEP_ROOM, { being: run.being, where, used: usedNow, cap, core_way: coreWay, moved }),
     `<${where}>\n${next[k].body}\n</${where}>`, `room ${k}`, run.log)) ?? {};
   let body = pyStrip(pyStr(pyOr(g.text, "")));
   body = body.startsWith("## ") ? sleepJoin(sleepSections(body)) : "";
+  const had = sectionMap(next[0].body);
+  const moves: [number, string, string][] = [];
+  if (k === 0 && body) body = sleepJoin(sleepSections(body).filter(([h]) => had.has(h)));
   if (k === 0 && body) {
-    const mine = sectionMap(next[0].body).get(me);
-    if (mine === undefined) {
-      body = sleepDropSection(body, me)[0];
-    } else if (sectionMap(body).get(me) !== mine) {
-      body = sleepSetSection(body, me, mine, true);
-    }
+    const mine = had.get(me);
+    if (mine !== undefined && sectionMap(body).get(me) !== mine) body = sleepSetSection(body, me, mine, true);
     for (const mv of pyIter(pyOr(g.moved, []))) {
       if (isPlainObject(mv) && ["1", "2", "3", "4"].includes(pyStr(mv.to))) {
         const sec = pyStrip(pyStr(pyOr(mv.section, "")));
-        const held = sectionMap(next[0].body).get(sec);
-        if (held !== undefined && sec !== me && !sectionMap(body).has(sec)) {
-          const to = pyInt(mv.to);
-          next[to].body = sleepSetSection(next[to].body, sec, held);
+        const held = had.get(sec);
+        if (held !== undefined && sec !== me && !sectionMap(body).has(sec) && !moves.some(([, s]) => s === sec)) {
+          moves.push([pyInt(mv.to), sec, held]);
         }
       }
     }
   }
-  if (body && run.count(body) <= cap) {
+  const boxes = new Map<number, string>();
+  for (const [to, sec, held] of moves) boxes.set(to, sleepSetSection(boxes.get(to) ?? next[to].body, sec, held));
+  if (body && run.count(body) <= cap && [...boxes.values()].every((b) => run.count(b) <= run.s.boxTokens)) {
     rooms.push({ file: k, before: usedNow, after: run.count(body) });
     next[k].body = body;
+    for (const [to, b] of boxes) next[to].body = b;
+    for (const [to, sec, held] of moves) carried.push([k, to, sec, held]);
   } else {
     rooms.push({ file: k, before: usedNow, after: null });
     refused.push({
       edit: { file: k, op: "room" },
       why: why || `no room: ${thou(usedNow)} of ${thou(cap)} tokens, and the room made came back unshaped or still too big; the file stays as it was`,
     });
-    next[k] = { ...files[k] };
+    sleepPutBack(next, files, k, carried);
   }
 }
 
-function sleepBoxesFit(run: SleepRun, next: SleepFileState[], files: SleepFileState[], refused: SleepRefusal[]): void {
+function sleepBoxesFit(run: SleepRun, next: SleepFileState[], files: SleepFileState[], refused: SleepRefusal[], carried: SleepCarried): void {
   for (const k of SLEEP_BOXES) {
     if (run.count(next[k].body) > run.s.boxTokens) {
       refused.push({ edit: { file: k, op: "room" }, why: "over its cap after a move; the box stays as it was" });
-      next[k] = { ...files[k] };
+      sleepPutBack(next, files, k, carried);
     }
   }
 }
@@ -1445,11 +1562,27 @@ function sleepCode(e: WosError): string | undefined {
   return typeof code === "string" ? code : e.type;
 }
 
+function sleepDedupe(next: SleepFileState[], deduped: Record<string, unknown>[], carried: SleepCarried): void {
+  const inCore = new Set(sleepSections(next[0].body).map(([h]) => h).filter((h) => h !== SLEEP_ME));
+  for (const k of SLEEP_BOXES) {
+    for (const [h] of sleepSections(next[k].body)) {
+      if (inCore.has(h)) {
+        const [body, gone] = sleepDropSection(next[k].body, h);
+        next[k].body = body;
+        deduped.push({ file: k, section: h });
+        carried.push([k, 0, h, gone ?? ""]);
+      }
+    }
+  }
+}
+
 async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, files: SleepFileState[], next: SleepFileState[],
-  ev: string[], day: string, refused: SleepRefusal[], rooms: SleepRoomMade[]): Promise<Record<number, number>> {
+  ev: string[], day: string, refused: SleepRefusal[], rooms: SleepRoomMade[], carried: SleepCarried,
+  deduped: Record<string, unknown>[]): Promise<Record<number, number>> {
   const s = run.s;
   const madeRoom = new Set<number>();
   for (;;) {
+    sleepDedupe(next, deduped, carried);
     const writes: SleepWrite[] = SLEEP_SLOTS
       .filter((k) => next[k].body !== files[k].body || next[k].title !== files[k].title)
       .map((k) => ({ slot: k, base_version: files[k].version, title: next[k].title, body: next[k].body, evidence: ev, day }));
@@ -1466,7 +1599,7 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
           if (!Object.prototype.hasOwnProperty.call(d, key)) d[key] = pyDec(said[i + 1]);
         });
       }
-      const fill = (w: SleepWrite): number => run.count(w.body) / (w.slot === 0 ? s.coreTokens : s.boxTokens);
+      const fill = (w: SleepWrite): number => run.count(w.body) / sleepCap(s, w.slot);
       let k: number;
       if (isWhole(d.slot) && writes.some((w) => w.slot === d.slot)) {
         k = d.slot;
@@ -1475,10 +1608,10 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
         for (const w of writes.slice(1)) if (fill(w) > fill(fullest)) fullest = w;
         k = fullest.slot;
       }
-      const cap = k === 0 ? s.coreTokens : s.boxTokens;
+      const cap = sleepCap(s, k);
       if (madeRoom.has(k)) {
         refused.push({ edit: { file: k, op: "room" }, why: "no room: the service counts it over its cap; the file stays as it was" });
-        next[k] = { ...files[k] };
+        sleepPutBack(next, files, k, carried);
         continue;
       }
       madeRoom.add(k);
@@ -1488,9 +1621,9 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
       const target = isWhole(told) && told > 0 && told > limit && d.slot === k
         ? floorDiv(limit * usedNow, told)
         : floorDiv(Math.min(usedNow, cap) * 9, 10);
-      await sleepRoom(run, next, files, k, usedNow, Math.max(1, Math.min(cap, target)), rooms, refused,
+      await sleepRoom(run, next, files, k, usedNow, Math.max(1, Math.min(cap, target)), rooms, refused, carried,
         "no room: the service counts it over its cap, and the room made came back unshaped or still too big; the file stays as it was");
-      sleepBoxesFit(run, next, files, refused);
+      sleepBoxesFit(run, next, files, refused, carried);
       continue;
     }
     return sleepWritten(r, writes);
@@ -1500,6 +1633,10 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
 async function sleepDoneFlow(host: SleepHost, run: SleepRun, sleepId: string): Promise<Record<string, unknown> | null> {
   if (!run.done) return null;
   return host.write("/api/v1/memory/sleep/done", { user_id: host.store, sleep_id: sleepId });
+}
+
+function sleepTitles(files: { title: string }[]): string {
+  return SLEEP_BOXES.map((k) => `${k}: ${files[k].title || "(empty)"}`).join("\n");
 }
 
 async function sleepAssistant(host: SleepHost, run: SleepRun): Promise<string> {
@@ -1543,8 +1680,8 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
   const seeded = run.prompt ? await sleepSeed(host, run, files, sid, day) : false;
   const mems = sleepMemories(rows, being, assistant, run.lineTime, run.givenCount);
   const core = files[0].body;
-  const titles = SLEEP_BOXES.map((k) => `${k}: ${files[k].title || "(empty)"}`).join("\n");
-  const proposals = notes.proposals;
+  const titles = sleepTitles(files);
+  const proposals = notes.proposals.filter(sleepReadable);
   const readTokens = mems.reduce((n, m) => n + m.tokens, 0);
   run.say(`${mems.length} memories, ${thou(readTokens)} tokens → ${sleepParts(mems, s.partTokens).length} readers ` +
     `(${s.readers} at a time)`);
@@ -1561,7 +1698,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
   const saidAll = new Set(mems.filter((m) => m.mine).map((m) => m.eid));
   const byEid = new Map(mems.map((m) => [m.eid, m]));
   const spanEnd = mems[mems.length - 1].mid;
-  const [parts, readLists, dropped, mixed] = await sleepReadParts(run, mems, core, titles);
+  const [parts, readLists, dropped, mixed, unread] = await sleepReadParts(run, mems, core, titles);
   for (const x of mixed) x.sleep = today;
   const marked = new Set(notes.mixed.map(sleepMarkKey));
   notes.mixed.push(...mixed.filter((x) => !marked.has(sleepMarkKey(x))));
@@ -1591,7 +1728,9 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
   const tidied: Record<string, unknown>[] = [];
   const rooms: SleepRoomMade[] = [];
   const touched = new Map<string, [number, string]>();
+  const carried: SleepCarried = [];
   const touch = (k: number, h: string): void => void touched.set(`${k}\u0000${h}`, [k, h]);
+  let unmerged = false;
   if (items.length || ripe.length) {
     const blocks = SLEEP_BOXES.map((k) => `<box ${k} name="${files[k].title || "(empty)"}" size="${thou(count(files[k].body))} of ` +
       `${thou(s.boxTokens)} tokens">\n${files[k].body || "(empty)"}\n</box ${k}>`).join("\n");
@@ -1608,14 +1747,15 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
     if (got === undefined) {
       got = await sleepAskJsonLogged(run.merge, system, user + SLEEP_SHORTER, "merge shorter", log);
     }
+    unmerged = got === undefined;
     const g = got ?? {};
     mergeNotes = Array.isArray(g.notes) ? g.notes.map(pyStr) : [];
     const slotOf = new Map([["core", 0], ["0", 0], ["1", 1], ["2", 2], ["3", 3], ["4", 4]]);
-    const ripeIds = new Set<unknown>(ripe.map((p) => p.id));
+    const ripeIds = new Set<unknown>(ripe.map((p) => p.id).filter((id) => typeof id === "string"));
     const tonight = items.filter((it) => it.kind === "person").map((it) => pyStrip(it.topic).toLowerCase());
     const aboutTonight = (name: string): boolean => {
       const n = pyStrip(name).toLowerCase();
-      return tonight.some((t) => n !== "" && t !== "" && (t.includes(n) || n.includes(t)));
+      return tonight.some((t) => sleepSpeaksOf(t, n));
     };
     for (const e of Array.isArray(g.edits) ? g.edits : []) {
       let why: string | undefined;
@@ -1623,13 +1763,17 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
       const op = e.op;
       const slot = slotOf.get(pyStr(e.file));
       const ev = sleepEids(e.evidence);
-      if (slot === undefined || !(op === "rewrite" || op === "remake" || op === "move_section" || op === "title")) {
+      let madeRipe: unknown;
+      if (sleepHeadingBroken(e)) {
+        why = "a heading or a title holds a line break or a control character";
+      } else if (slot === undefined || !(op === "rewrite" || op === "remake" || op === "move_section" || op === "title")) {
         why = "unknown file or op";
       } else if ((op === "rewrite" || op === "remake") && (!ev.length || ev.some((x) => !knownAll.has(x))) &&
         !(op === "rewrite" && slot === 0 && ripeIds.has(e.ripe))) {
         why = "no evidence, or evidence not in this sleep";
       } else if (op === "rewrite") {
-        const sec = pyStrip(pyLstrip(pyStrip(pyStr(pyOr(e.section, ""))), "#"));
+        const named = sleepHeading(pyStr(pyOr(e.section, "")));
+        const sec = slot === 0 && named.toLowerCase() === me.toLowerCase() ? me : named;
         if (!sec || !pyStrip(pyStr(pyOr(e.text, "")))) {
           why = "rewrite needs a section and text";
         } else if (slot === 0 && sec === me && !ripeIds.has(e.ripe)) {
@@ -1650,6 +1794,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
           } else {
             next[slot].body = sleepSetSection(next[slot].body, sec, text, slot === 0 && sec === me);
             touch(slot, sec);
+            if (slot === 0 && sec === me) madeRipe = e.ripe;
           }
         }
       } else if (op === "remake") {
@@ -1668,8 +1813,8 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         }
       } else if (op === "move_section") {
         const to = slotOf.get(pyStr(e.to));
-        const sec = pyStrip(pyLstrip(pyStrip(pyStr(pyOr(e.section, ""))), "#"));
-        if (to === undefined || to === slot || ((slot === 0 || to === 0) && sec === me)) {
+        const sec = sleepHeading(pyStr(pyOr(e.section, "")));
+        if (to === undefined || to === slot || ((slot === 0 || to === 0) && sec.toLowerCase() === me.toLowerCase())) {
           why = "move needs another file, and the self section stays";
         } else {
           const [body, text] = sleepDropSection(next[slot].body, sec);
@@ -1678,6 +1823,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
           } else {
             next[slot].body = body;
             next[to].body = sleepSetSection(next[to].body, sec, text);
+            carried.push([slot, to, sec, text]);
           }
         }
       } else {
@@ -1691,23 +1837,15 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
       } else {
         applied.push(e);
         for (const x of ev) used.add(x);
-        if (pyTruthy(e.ripe)) for (const p of proposals) if (p.id === e.ripe) p.applied = today;
+        if (madeRipe !== undefined) for (const p of proposals) if (p.id === madeRipe) p.applied = today;
       }
     }
-    const inCore = new Set(sleepSections(next[0].body).map(([h]) => h).filter((h) => h !== me));
-    for (const k of SLEEP_BOXES) {
-      for (const [h] of sleepSections(next[k].body)) {
-        if (inCore.has(h)) {
-          next[k].body = sleepDropSection(next[k].body, h)[0];
-          deduped.push({ file: k, section: h });
-        }
-      }
-    }
-    const order = [...touched.values()].sort((a, b) => a[0] - b[0] || cpCompare(a[1], b[1]));
+    sleepDedupe(next, deduped, carried);
+    const order =[...touched.values()].sort((a, b) => a[0] - b[0] || cpCompare(a[1], b[1]));
     for (const [k, h] of order) {
       const t = sectionMap(next[k].body).get(h);
       if (!t || (k === 0 && h === me)) continue;
-      const where = k === 0 ? "core" : `box "${next[k].title}"`;
+      const where = sleepWhere(next, k);
       const numbered = t.split("\n").filter((ln) => pyStrip(ln)).map((ln, i) => `${i + 1}: ${ln}`).join("\n");
       const tg = (await sleepAskJson(run.merge, pyFormat(SLEEP_TIDY, { being, where }),
         `<section heading="${h}">\n${numbered}\n</section>`, `tidy ${k}:${h}`, log)) ?? {};
@@ -1726,7 +1864,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         if (ls.length <= limit && !long) continue;
         const why = [ls.length > limit ? `${ls.length} lines` : "", long ? `${long} lines longer than one idea` : ""]
           .filter((x) => x).join(", ");
-        const where = k === 0 ? "core" : `box "${next[k].title}"`;
+        const where = sleepWhere(next, k);
         const fg = (await sleepAskJson(run.merge, pyFormat(SLEEP_FOLD_SECTION, { being, where, why, lines: limit }),
           `<section heading="${h}">\n${t}\n</section>`, `fold ${k}:${h}`, log)) ?? {};
         const text = sleepAsLines(pyStr(pyOr(fg.text, "")));
@@ -1740,12 +1878,12 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
       }
     }
     for (const k of SLEEP_SLOTS) {
-      const cap = k === 0 ? s.coreTokens : s.boxTokens;
+      const cap = sleepCap(s, k);
       const usedNow = count(next[k].body);
       if (usedNow <= cap) continue;
-      await sleepRoom(run, next, files, k, usedNow, cap, rooms, refused);
+      await sleepRoom(run, next, files, k, usedNow, cap, rooms, refused, carried);
     }
-    sleepBoxesFit(run, next, files, refused);
+    sleepBoxesFit(run, next, files, refused, carried);
     const seenNow = new Set<unknown>();
     for (const p of Array.isArray(g.proposals) ? g.proposals : []) {
       if (!isPlainObject(p) || !pyStrip(pyStr(pyOr(p.text, "")))) continue;
@@ -1755,24 +1893,27 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         continue;
       }
       const text = pyStrip(pyStr(p.text));
-      const same = proposals.find((q) => (q.id ?? null) === (p.same_as ?? null)) ??
+      const same = proposals.find((q) => typeof q.id === "string" && q.id === p.same_as) ??
         proposals.find((q) => countedHere(q) && q.text === text);
       if (same && !seenNow.has(same.id)) {
         if (!countedHere(same)) Object.assign(same, { sleeps: same.sleeps + 1, last_day: today, text, span_end: spanEnd });
         seenNow.add(same.id);
       } else if (!same) {
-        const pid = `p${proposals.length + 1}`;
-        proposals.push({ id: pid, text, sleeps: 1, first: nowSecs, first_day: today, last_day: today, span_end: spanEnd });
+        const pid = sleepNextId(notes.proposals);
+        const made = { id: pid, text, sleeps: 1, first: nowSecs, first_day: today, last_day: today, span_end: spanEnd };
+        proposals.push(made);
+        notes.proposals.push(made);
         seenNow.add(pid);
       }
     }
   }
   const ev = [...new Set([...used].filter((e) => byEid.has(e)).map((e) => (byEid.get(e) as SleepLine).mid))].sort(cpCompare);
-  const written = await sleepWriteFlow(host, run, sid, files, next, ev, day, refused, rooms);
+  const written = await sleepWriteFlow(host, run, sid, files, next, ev, day, refused, rooms, carried, deduped);
+  sleepNotesFit(notes);
   if (canon(notes) !== before) {
     await host.write("/api/v1/memory/self/notes/write", { user_id: host.store, base_version: notesVersion, notes });
   }
-  const ended = await sleepDoneFlow(host, run, sid);
+  const ended = unread.length || unmerged ? null : await sleepDoneFlow(host, run, sid);
   const secs = Math.round((now() - t0) / 100) / 10;
   const slots = Object.keys(written).map(Number).sort((a, b) => a - b);
   run.say(`done in ${Number.isInteger(secs) ? `${secs}.0` : pyFloat(secs)}s · ${items.length} items · ${applied.length} edits, ` +
@@ -1793,7 +1934,7 @@ export async function sleepEstimateFlow(host: SleepHost, run: SleepRun, inputPri
   const mems = sleepMemories(rows, run.being, "", "created_at", run.givenCount);
   const parts = sleepParts(mems, run.s.partTokens);
   const tokens = mems.reduce((n, m) => n + m.tokens, 0);
-  const titles = SLEEP_BOXES.map((k) => `${k}: ${view[k].title || "(empty)"}`).join("\n");
+  const titles = sleepTitles(view);
   const frame = run.count(SLEEP_DIGEST) + run.count(view[0].body || "") + run.count(titles);
   const sent = ceilDiv((tokens + parts.length * frame) * SLEEP_IN_PER_100, 100);
   const written = ceilDiv(tokens * SLEEP_OUT_PER_100, 100);
@@ -1821,7 +1962,9 @@ function sleepRunOf(o: { being: unknown; settings: unknown; since: unknown; slee
   const being = required(o.being, "being");
   let settings = o.settings;
   if (settings === undefined || settings === null) settings = new SleepSettings();
-  else if (!(settings instanceof SleepSettings)) throw new Error(`settings must be SleepSettings, got ${shown(settings)}.`);
+  else if (!(settings instanceof SleepSettings)) {
+    throw new Error(`settings must be SleepSettings, got ${Array.isArray(settings) ? "array" : typeof settings}.`);
+  }
   const since = o.since === undefined || o.since === null ? undefined : required(o.since, "since");
   const sleepId = o.sleepId === undefined || o.sleepId === null ? undefined : required(o.sleepId, "sleepId");
   const given = o.countTokens;
@@ -1852,7 +1995,7 @@ export function sleepSetup(host: SleepHost, opts: SleepOptions): SleepRun {
   if (typeof prompt !== "string") throw new Error(`prompt must be a string, got ${shown(prompt)}.`);
   const today = opts.today === null ? undefined : opts.today;
   if (today !== undefined && (typeof today !== "string" || sleepDate(cpSlice(today, 0, 10)) === undefined ||
-    (cpLen(today) > 10 && !/^ \p{Nd}{2}:\p{Nd}{2}$/u.test(cpSlice(today, 10))))) {
+    (cpLen(today) > 10 && !/^ \p{Nd}{2}:\p{Nd}{2}$/u.test(cpSlice(today, 10))) || sleepWhen(today) === undefined)) {
     throw new Error(`today must be "YYYY-MM-DD HH:MM" or "YYYY-MM-DD", the sleep's day, got ${shown(today)}.`);
   }
   const done = opts.done === undefined ? true : opts.done;
@@ -1901,5 +2044,5 @@ export function sleepEstimateSetup(host: SleepHost, opts: SleepEstimateOptions):
 export const SLEEP_PYTHON = {
   pyStrip, pyStr, pyInt, pyFormat, pyJsonIndent0, pyRound6, cpCompare, sleepWhen, sleepEids, sleepSections, sleepJoin,
   sleepAsLines, sleepSetSection, sleepDoubtLinesOut, sleepCheckedItems, sleepParseJson, sleepBoxPick, sleepRender, sleepParts,
-  sleepNotesOf,
+  sleepNotesOf, sleepReadable, sleepNotesFit, sleepLines, sleepSpeaksOf,
 };

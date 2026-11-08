@@ -54,9 +54,9 @@ const pad = (n) => String(n).padStart(2, "0");
 
 function nightRows(n, night) {
   const day = night.today.slice(0, 10);
-  return night.memories.map(([who, text], i) => ({
+  return night.memories.map(([who, text, name], i) => ({
     id: `m${n + 1}-${i + 1}`, content: text, created_at: `${day}T09:${pad(i)}:00Z`,
-    speaker: who === "user" ? "Alex" : "Wren", tokens: tok(text),
+    speaker: name ?? (who === "user" ? "Alex" : "Wren"), tokens: tok(text),
   }));
 }
 
@@ -256,9 +256,11 @@ async function provider(t, answers, kind, { fail, redirect, raw } = {}) {
   return { seen, caller };
 }
 
-function checkNight(scenario, n, night, res, svc, start) {
+function checkNight(scenario, n, night, res, svc, start, reads = []) {
   const where = `${scenario.name} night ${n + 1}`;
   const want = night.expect;
+  for (const s of want.read_has ?? []) assert.ok(reads.some((r) => r.includes(s)), `${where}: a reader was sent ${JSON.stringify(s)}`);
+  for (const s of want.read_lacks ?? []) assert.ok(!reads.some((r) => r.includes(s)), `${where}: no reader was sent ${JSON.stringify(s)}`);
   const core = svc.latest(0)?.body ?? "";
   const files = Object.values(svc.slots).flat().map((v) => `${v.body}\n${v.title}`);
   const notes = JSON.stringify(svc.notes ?? {});
@@ -291,9 +293,18 @@ test("sleep attacks: planted instructions meet the rules as the fixture says", a
     for (const [n, night] of scenario.nights.entries()) {
       svc.give(nightRows(n, night));
       const start = svc.seen.length;
-      const res = await mem.sleep("u", { llm: fixtureModel(night.answers).caller, prompt: scenario.prompt, today: night.today, settings: settingsOf(scenario) });
-      checkNight(scenario, n, night, res, svc, start);
+      const model = fixtureModel(night.answers);
+      const res = await mem.sleep("u", { llm: model.caller, prompt: scenario.prompt, today: night.today, settings: settingsOf(scenario) });
+      checkNight(scenario, n, night, res, svc, start, model.calls.filter(([system]) => system.includes(" you read part ")).map(([, user]) => user));
     }
+  }
+});
+
+test("sleep attacks: the rule of the by-name scenario gives the length each match needs", () => {
+  const { rule } = FIX.scenarios.find((s) => s.name === "a-person-is-spoken-of-by-name-not-by-a-piece-of-one");
+  for (const says of ["its name with something joined to its end when the name has two letters or more",
+    "the first three letters or more of its name", "a longer topic that starts with a one-letter name"]) {
+    assert.ok(rule.includes(says), `the rule says ${JSON.stringify(says)}: ${rule}`);
   }
 });
 

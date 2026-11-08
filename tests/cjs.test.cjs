@@ -39,7 +39,7 @@ test("the require condition ships a CommonJS declaration file", () => {
 
 test("the sleep loads under require, and its declarations sit beside the CJS types", () => {
   const mod = require("wontopos");
-  assert.equal(mod.SLEEP_VERSION, "1.0.0");
+  assert.equal(mod.SLEEP_VERSION, "1.0.1");
   assert.equal(new mod.SleepSettings({ readers: 2 }).readers, 2);
   assert.equal(typeof mod.Client.prototype.sleep, "function");
   const dir = require("node:path").join(__dirname, "..", "dist", "cjs");

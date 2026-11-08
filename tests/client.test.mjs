@@ -5,6 +5,7 @@ import net from "node:net";
 import { inspect } from "node:util";
 import { readFileSync } from "node:fs";
 import { Client, WosError } from "../dist/wontopos.js";
+import { CLOCK } from "./fake-clock.mjs";
 const DIST = new URL("../dist/wontopos.js", import.meta.url).href;
 
 function scriptedServer(script) {
@@ -203,12 +204,11 @@ for (const status of [504, 408]) {
   });
 }
 
-test("maxRetries: NaN falls back to default (still makes the request)", async () => {
+test("maxRetries: NaN is refused before any request", async () => {
   const { server, seen, base } = await scriptedServer([[200, {}, '{"memories":[]}']]);
   try {
-    const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: NaN });
-    assert.deepEqual(await mem.search("q", "u"), []);
-    assert.equal(seen.length, 1);
+    assert.throws(() => new Client({ apiKey: KEY, baseUrl: base, maxRetries: NaN }), /: maxRetries must be a whole number, 0 or more, got NaN\.$/);
+    assert.equal(seen.length, 0);
   } finally {
     server.close();
   }
@@ -251,7 +251,7 @@ test("fromEnv: empty first env var falls back; opts.apiKey cannot override the e
   const save = { W: env.WONTOPOS_API_KEY, W2: env.WOS_API_KEY };
   try {
     env.WONTOPOS_API_KEY = "   ";
-    env.WOS_API_KEY = "wos-fromenv-realkey1234";
+    env.WOS_API_KEY = "wos-fromenv-realkey-001234";
     const mem = Client.fromEnv({ apiKey: "wos-attacker-override-9999" });
     assert.ok(mem.toJSON().apiKey.endsWith("1234"));
   } finally {
@@ -304,7 +304,7 @@ test("every loopback or unspecified address is local, as Python and Rust read it
       new Client({ apiKey: KEY, baseUrl: base });
       assert.deepEqual(warns, [], base);
     }
-    for (const base of ["http://[::ffff:127.0.0.1]:9", "http://128.0.0.1", "http://127.0.0.1.example.com"]) {
+    for (const base of ["http://[::ffff:127.0.0.1]:9", "http://128.0.0.1", "http://127.0.0.1.example.com/v1"]) {
       new Client({ apiKey: KEY, baseUrl: base });
       assert.equal(warns.length, 1, base);
       warns.length = 0;
@@ -488,7 +488,8 @@ test("sends model + User-Agent headers", async () => {
 
 test("key hygiene: trims, rejects inner whitespace", () => {
   const mem = new Client({ apiKey: " wos-test-xxxxxxxxxx\n", baseUrl: "http://127.0.0.1:9" });
-  assert.ok(JSON.stringify(mem).includes("wos-"));
+  assert.equal(mem.apiKey, "wos-test-xxxxxxxxxx");
+  assert.equal(mem.toJSON().apiKey, "***");
   assert.throws(() => new Client({ apiKey: "wos-test xxxxxxxxxx" }), /whitespace/);
   assert.throws(() => new Client({ apiKey: "   " }), /required/);
 });
@@ -581,9 +582,9 @@ test("POST to a refused port IS retried (connect-level — the request never lef
   const port = tmp.address().port;
   await new Promise((r) => tmp.close(r));
   const mem = new Client({ apiKey: KEY, baseUrl: `http://127.0.0.1:${port}`, maxRetries: 1 });
-  const t0 = Date.now();
+  const t0 = CLOCK.now();
   await assert.rejects(mem.add("hi", "u"), (e) => e instanceof WosError && e.status === 0);
-  assert.ok(Date.now() - t0 >= 450, `elapsed ${Date.now() - t0}ms — expected a retry backoff`);
+  assert.ok(CLOCK.now() - t0 >= 450, `elapsed ${CLOCK.now() - t0}ms — expected a retry backoff`);
 });
 
 test("add, addTurn and addBulk wait 200s an attempt unless the caller set a timeout; the rest 30s", () => {
@@ -625,13 +626,11 @@ test("each call's attempt is timed by its own default", async () => {
   assert.deepEqual(waits, [200_000, 200_000, 200_000, 30_000, 30_000]);
 });
 
-test("timeoutMs: NaN (an unset env var through Number()) means the default", async () => {
+test("timeoutMs: NaN (an unset env var through Number()) is refused before any request", async () => {
   const { server, seen, base } = await scriptedServer([[200, {}, '{"memories":[]}']]);
   try {
-    const mem = new Client({ apiKey: KEY, baseUrl: base, timeoutMs: NaN });
-    assert.equal(mem.timeoutMs, 30_000);
-    await mem.search("q", "alice");
-    assert.equal(seen.length, 1);
+    assert.throws(() => new Client({ apiKey: KEY, baseUrl: base, timeoutMs: NaN }), /: timeoutMs must be a number of milliseconds/);
+    assert.equal(seen.length, 0);
   } finally {
     server.close();
   }
@@ -909,9 +908,8 @@ test("revisions opts cannot take over the store id", async () => {
   const { server, seen, base } = await scriptedServer([[200, {}, "{}"]]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
-    await mem.revisions("alice", { user_id: "bob", include: "revised" });
-    assert.equal(JSON.parse(seen[0].body).user_id, "alice",
-      "opts swapped the store out — that is a path to reading someone else's");
+    await assert.rejects(mem.revisions("alice", { user_id: "bob", include: "revised" }), /"user_id" is set by the call, not by options/);
+    assert.equal(seen.length, 0, "opts would have swapped the store out, so nothing is sent");
   } finally {
     server.close();
   }
@@ -1300,6 +1298,41 @@ test("billedTo says when API credit paid, and a used-up week says why and when i
   }
 });
 
+test("weekUsed is the whole percent the last answer carried, as every client reads it", async () => {
+  const cases = [["37", 37], ["0", 0], ["100", 100], ["007", 7], ["000000000000000000000050", 50], [null, null], ["101", null],
+    ["256", null], ["-1", null], ["37.5", null], ["1e2", null], ["+5", null], ["0x10", null], ["12abc", null], ["", null]];
+  const usedUp = `{"type":"error","error":{"type":"billing_error","message":"This week's subscription usage is used up.","reason":"weekly_limit_reached","resets_at":"2026-11-01T01:00:00.000Z"}}`;
+  const { server, base } = await scriptedServer([
+    ...cases.map(([v]) => [200, v === null ? {} : { "X-WOS-Week-Used": v }, "{}"]),
+    [200, { "X-WOS-Week-Used": "91" }, "{}"],
+    [402, { "X-WOS-Week-Used": "100" }, usedUp],
+    [502, {}, `{"error": "bad gateway"}`],
+    [402, { "X-WOS-Week-Used": "101" }, usedUp],
+    [200, {}, "{}"],
+  ]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 0 });
+    assert.equal(mem.weekUsed, null);
+    for (const [v, want] of cases) {
+      await mem.stats("u");
+      assert.equal(mem.weekUsed, want, String(v));
+    }
+    await mem.stats("u");
+    assert.equal(mem.weekUsed, 91);
+    await assert.rejects(mem.stats("u"), (e) => e instanceof WosError && e.status === 402);
+    assert.equal(mem.weekUsed, 100, "a refusal that carries it sets it");
+    await assert.rejects(mem.stats("u"), (e) => e instanceof WosError && e.status === 502);
+    assert.equal(mem.weekUsed, 100, "a refusal without it leaves it");
+    await assert.rejects(mem.stats("u"), (e) => e instanceof WosError && e.status === 402);
+    assert.equal(mem.weekUsed, 100, "and so does one whose value is not a percent");
+    assert.equal(mem.withModel("scroll-2").weekUsed, null, "a copy starts with none");
+    await mem.stats("u");
+    assert.equal(mem.weekUsed, null, "a success without it says no plan week");
+  } finally {
+    server.close();
+  }
+});
+
 test("whether an idempotent write was replayed shows up in the result", async () => {
   const { server, base } = await scriptedServer([
     [200, { "Idempotent-Replayed": "true" }, '{"id":"m1","status":"stored"}'],
@@ -1334,7 +1367,7 @@ test("a replay of the client's own retry is not reported as replayed", async () 
 });
 
 test("the published type of replayed says it marks a replay of the key the caller passed", () => {
-  for (const file of ["../dist/wontopos.d.ts", "../dist/cjs/wontopos.d.cts"]) {
+  for (const file of ["../dist/types.d.ts", "../dist/cjs/types.d.ts"]) {
     const dts = readFileSync(new URL(file, import.meta.url), "utf8");
     const doc = /\/\*\*(?:(?!\*\/)[\s\S])*\*\/\s*replayed\?: boolean;/.exec(dts);
     assert.ok(doc, `${file}: replayed`);
@@ -1748,7 +1781,7 @@ test("the unknown-filter warning set is bounded", async () => {
 
 
 test("wrapped base64 loses its newlines before it is sent", async () => {
-  const src = readFileSync(new URL("../src/wontopos.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/checks.ts", import.meta.url), "utf8");
   assert.match(src, /replace\(\/\\s\+\/g, ""\)/,
     "nothing strips whitespace from the base64 payload — wrapped input becomes a 400");
   const i = src.indexOf("const raw = image.data.trim()");
@@ -1878,7 +1911,7 @@ test("an argument mistake is a plain Error, never a WosError", async () => {
 });
 
 test("status 0 is reserved for APIConnectionError — nothing else constructs it", () => {
-  const dist = readFileSync(new URL("../dist/wontopos.js", import.meta.url), "utf8");
+  const dist = ["wontopos", "types", "checks", "http", "callers", "router"].map((f) => readFileSync(new URL(`../dist/${f}.js`, import.meta.url), "utf8")).join("\n");
   const stray = [...dist.matchAll(/new (\w*Error)\(\s*0\s*,/g)].map((m) => m[1]);
   assert.deepEqual(
     [...new Set(stray)].sort(),
@@ -1956,7 +1989,7 @@ test("the caller's signal cancels a request in flight", async () => {
   }
 });
 
-test("aborting during a backoff wakes immediately instead of sleeping it out", async () => {
+test("aborting during a backoff wakes immediately instead of sleeping it out", () => CLOCK.onRealTime(async () => {
   const { server, base } = await scriptedServer([
     [429, { "Retry-After": "2" }, '{"error":"rate limited"}'],
     [200, {}, "{}"],
@@ -1972,7 +2005,7 @@ test("aborting during a backoff wakes immediately instead of sleeping it out", a
   } finally {
     server.close();
   }
-});
+}));
 
 test("a deadline bounds the whole call, not one attempt", async () => {
   const { RateLimitError } = await import(DIST);
@@ -1982,9 +2015,9 @@ test("a deadline bounds the whole call, not one attempt", async () => {
   ]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base, deadlineMs: 200 });
-    const t0 = Date.now();
+    const t0 = CLOCK.now();
     await assert.rejects(() => mem.search("q", "alice"), (e) => e instanceof RateLimitError && e.retryAfter === 5);
-    const spent = Date.now() - t0;
+    const spent = CLOCK.now() - t0;
     assert.ok(spent < 150, `spent ${spent}ms against a 200ms budget`);
   } finally {
     server.close();
@@ -2023,7 +2056,7 @@ test("a long-lived signal does not collect one listener per request", async () =
 
 test("dist ships no source comments in JS and keeps the doc comments in .d.ts", () => {
   const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
-  for (const js of ["../dist/wontopos.js", "../dist/cjs/wontopos.js"]) {
+  for (const js of ["wontopos", "types", "checks", "http", "callers", "router"].flatMap((f) => [`../dist/${f}.js`, `../dist/cjs/${f}.js`])) {
     const lines = read(js).split("\n").filter((l) => /^\s*(\/\/|\/\*|\*)/.test(l));
     assert.equal(
       lines.length,
@@ -2032,7 +2065,7 @@ test("dist ships no source comments in JS and keeps the doc comments in .d.ts", 
         `tsconfig.json. First: ${lines[0]?.trim()}`
     );
   }
-  const dts = read("../dist/wontopos.d.ts");
+  const dts = read("../dist/wontopos.d.ts") + read("../dist/types.d.ts");
   const docs = (dts.match(/\/\*\*/g) ?? []).length;
   assert.ok(
     docs > 150,
@@ -2098,7 +2131,7 @@ test("an argument the client refuses arrives as a rejection, never as a synchron
 });
 
 test("no promise-returning method is left synchronous", async () => {
-  const src = readFileSync(new URL("../src/wontopos.ts", import.meta.url), "utf8");
+  const src = ["wontopos.ts", "callers.ts", "router.ts"].map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8")).join("\n");
   const lines = src.split("\n");
   const missed = [];
   const from = lines.findIndex((l) => l.startsWith("export class Client"));
@@ -2143,9 +2176,9 @@ test("a 409 that says another write was in flight is retried, writes included", 
   ]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
-    const t0 = Date.now();
+    const t0 = CLOCK.now();
     const r = await mem.add("x", "alice");
-    const spent = Date.now() - t0;
+    const spent = CLOCK.now() - t0;
     assert.equal(r.id, "m1");
     assert.equal(seen.length, 2);
     assert.ok(spent >= 450, `retried after ${spent}ms`);
@@ -2161,9 +2194,9 @@ test("a write-lock 409 waits retry_after_ms when that is longer than the backoff
   ]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
-    const t0 = Date.now();
+    const t0 = CLOCK.now();
     await mem.addTurn("hi", "hello", "alice");
-    assert.ok(Date.now() - t0 >= 1150, `retried after ${Date.now() - t0}ms`);
+    assert.ok(CLOCK.now() - t0 >= 1150, `retried after ${CLOCK.now() - t0}ms`);
     assert.equal(seen.length, 2);
   } finally {
     server.close();
@@ -2230,7 +2263,7 @@ test("a 429 whose Retry-After does not fit the deadline is reported as the 429",
   ]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base, deadlineMs: 1000 });
-    const t0 = Date.now();
+    const t0 = CLOCK.now();
     await assert.rejects(mem.add("x", "alice"), (e) => {
       assert.ok(e instanceof RateLimitError, String(e));
       assert.equal(e.status, 429);
@@ -2239,7 +2272,7 @@ test("a 429 whose Retry-After does not fit the deadline is reported as the 429",
       assert.match(e.message, /slow down/);
       return true;
     });
-    assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0}ms`);
+    assert.ok(CLOCK.now() - t0 < 500, `took ${CLOCK.now() - t0}ms`);
     assert.equal(seen.length, 1);
   } finally {
     server.close();
@@ -2277,7 +2310,7 @@ function answerOnceThenHang(first) {
     req.on("data", () => {});
     req.on("end", () => {
       seen.push(req.method);
-      if (seen.length > 1) return;
+      if (seen.length > 1) return CLOCK.skipToNextTimer();
       const [status, headers, payload] = first;
       res.writeHead(status, { "Content-Type": "application/json", ...headers });
       res.end(payload);
@@ -2380,7 +2413,7 @@ test("a retry the deadline leaves no time to send reports the answer that led to
     let calls = 0;
     const canned = async () => {
       calls++;
-      setTimeout(() => (skew = 120_000), 300);
+      CLOCK.timer(() => (skew = 120_000), 300);
       return new Response(errBody("rate_limit_error", "slow down"), {
         status: 429,
         headers: { "Content-Type": "application/json", "Retry-After": "1" },
@@ -2488,11 +2521,13 @@ test("a cancel while an error body is streaming still says cancelled", async () 
 function stalledErrorThenOkServer(status, ok) {
   const seen = [];
   const sockets = new Set();
+  let closed = false;
   const server = http.createServer((req, res) => {
     req.on("data", () => {});
     req.on("end", () => {
       seen.push(req.method);
       if (seen.length === 1) {
+        CLOCK.nextTimer().then((t) => closed || CLOCK.skipTo(t));
         res.writeHead(status, { "Content-Type": "application/json", "Content-Length": "50", "Retry-After": "0" });
         res.write("{");
         return;
@@ -2506,6 +2541,7 @@ function stalledErrorThenOkServer(status, ok) {
     s.on("close", () => sockets.delete(s));
   });
   const close = () => {
+    closed = true;
     for (const s of sockets) s.destroy();
     server.close();
   };
@@ -2523,9 +2559,9 @@ test("a retried answer does not wait out its stalled error body", async () => {
     const s = await stalledErrorThenOkServer(status, ok);
     try {
       const mem = new Client({ apiKey: KEY, baseUrl: s.base, timeoutMs: 6_000 });
-      const t0 = Date.now();
+      const t0 = CLOCK.now();
       await call(mem);
-      const spent = Date.now() - t0;
+      const spent = CLOCK.now() - t0;
       assert.equal(s.seen.length, 2);
       assert.ok(spent < 2_500, `${status}: the retry went out after ${spent}ms`);
     } finally {
@@ -2536,7 +2572,10 @@ test("a retried answer does not wait out its stalled error body", async () => {
 
 test("a retried answer whose custom body never finishes is not waited on either", async () => {
   let calls = 0;
-  const never = () => new Promise(() => {});
+  const never = () => {
+    setImmediate(() => CLOCK.skipToNextTimer());
+    return new Promise(() => {});
+  };
   const stub = async () => {
     calls++;
     const headers = new Headers({ "Retry-After": "0" });
@@ -2548,24 +2587,25 @@ test("a retried answer whose custom body never finishes is not waited on either"
     return new Response('{"models":[]}', { status: 200 });
   };
   const mem = new Client({ apiKey: KEY, baseUrl: "http://127.0.0.1:9", timeoutMs: 6_000, fetch: stub });
-  const t0 = Date.now();
+  const t0 = CLOCK.now();
   assert.deepEqual(await mem.listModels(), []);
   assert.equal(calls, 3);
-  assert.ok(Date.now() - t0 < 4_000, `took ${Date.now() - t0}ms`);
+  assert.ok(CLOCK.now() - t0 < 4_000, `took ${CLOCK.now() - t0}ms`);
 });
 
 test("a final error answer still waits for its body under the attempt's timeout", async () => {
   const { RateLimitError } = await import(DIST);
   const s = await stalledErrorThenOkServer(429, "{}");
   try {
-    const mem = new Client({ apiKey: KEY, baseUrl: s.base, timeoutMs: 1_500, maxRetries: 0 });
-    const t0 = Date.now();
+    const fetch = (url, init) => globalThis.fetch(url, init).then((res) => (setImmediate(() => CLOCK.skipToNextTimer()), res));
+    const mem = new Client({ apiKey: KEY, baseUrl: s.base, timeoutMs: 1_500, maxRetries: 0, fetch });
+    const t0 = CLOCK.now();
     await assert.rejects(mem.add("x", "alice"), (e) => {
       assert.ok(e instanceof RateLimitError, String(e));
       assert.match(e.message, /could not be read: request timed out after 1500ms/);
       return true;
     });
-    assert.ok(Date.now() - t0 >= 1_400);
+    assert.ok(CLOCK.now() - t0 >= 1_400);
     assert.equal(s.seen.length, 1);
   } finally {
     s.close();
@@ -2585,7 +2625,16 @@ test("a 409 reads its whole body, however slowly it arrives, to learn whether to
       }
       res.writeHead(409, { "Content-Type": "application/json" });
       res.write('{"type":"error",');
-      setTimeout(() => res.end(`"error":${JSON.stringify({ type: "conflict_error", message: "busy", retry_after_ms: 0 })}}`), 1_300);
+      let ticks = 13;
+      const tick = () => {
+        if (ticks-- > 0) {
+          CLOCK.advance(100);
+          setTimeout(tick, 5);
+          return;
+        }
+        res.end(`"error":${JSON.stringify({ type: "conflict_error", message: "busy", retry_after_ms: 0 })}}`);
+      };
+      setTimeout(tick, 5);
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -2636,12 +2685,12 @@ test("a Retry-After beyond the backoff cap raises at once, with retryAfter", asy
   ]);
   try {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
-    const t0 = Date.now();
+    const t0 = CLOCK.now();
     await assert.rejects(mem.usage(7), (e) => e instanceof RateLimitError && e.retryAfter === 3600);
     assert.equal(seen.length, 1);
     await assert.rejects(mem.usage(7), (e) => e instanceof RateLimitError && e.retryAfter > 3590 && e.retryAfter <= 3601);
     assert.equal(seen.length, 2);
-    assert.ok(Date.now() - t0 < 1000, `slept ${Date.now() - t0}ms`);
+    assert.ok(CLOCK.now() - t0 < 1000, `slept ${CLOCK.now() - t0}ms`);
   } finally {
     server.close();
   }
@@ -2663,24 +2712,22 @@ test("RateLimitError carries the Retry-After it was given, and nothing when ther
 });
 
 test("a Retry-After that is neither seconds nor an HTTP-date falls back to the backoff", async () => {
-  await Promise.all(
-    ["-5", "5, 10", "0x2", "garbage", "1.5", ""].map(async (v) => {
-      const { server, seen, base } = await scriptedServer([
-        [429, { "Retry-After": v }, "{}"],
-        [200, {}, "{}"],
-      ]);
-      try {
-        const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 1 });
-        const t0 = Date.now();
-        await mem.stats("alice");
-        const spent = Date.now() - t0;
-        assert.equal(seen.length, 2);
-        assert.ok(spent >= 450 && spent < 1500, `${JSON.stringify(v)}: waited ${spent}ms`);
-      } finally {
-        server.close();
-      }
-    }),
-  );
+  for (const v of ["-5", "5, 10", "0x2", "garbage", "1.5", ""]) {
+    const { server, seen, base } = await scriptedServer([
+      [429, { "Retry-After": v }, "{}"],
+      [200, {}, "{}"],
+    ]);
+    try {
+      const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 1 });
+      const t0 = CLOCK.now();
+      await mem.stats("alice");
+      const spent = CLOCK.now() - t0;
+      assert.equal(seen.length, 2);
+      assert.ok(spent >= 450 && spent < 1500, `${JSON.stringify(v)}: waited ${spent}ms`);
+    } finally {
+      server.close();
+    }
+  }
 });
 
 test("an error keeps the service's type and the rest of its error object", async () => {
@@ -2919,14 +2966,18 @@ test("the constructor refuses userId: undefined, like withUser(undefined)", () =
   assert.equal(new Client({ apiKey: KEY }).toJSON().userId, "default", "leaving the option out is still the default store");
 });
 
-test("a timeout that is not a positive number means the default; Infinity is clamped", () => {
-  for (const unset of [NaN, -Infinity, 0, -1, "30000", null, undefined]) {
+test("a timeout of 0 or none means the default and Infinity is clamped; one that is not a number of ms is refused", () => {
+  for (const unset of [0, null, undefined]) {
     assert.equal(new Client({ apiKey: KEY, timeoutMs: unset }).timeoutMs, 30_000, `timeoutMs ${String(unset)}`);
     assert.equal(new Client({ apiKey: KEY, deadlineMs: unset }).deadlineMs, undefined, `deadlineMs ${String(unset)}`);
   }
+  for (const bad of [NaN, -Infinity, -1, "30000"]) {
+    assert.throws(() => new Client({ apiKey: KEY, timeoutMs: bad }), /: timeoutMs must be/, `timeoutMs ${String(bad)}`);
+    assert.throws(() => new Client({ apiKey: KEY, deadlineMs: bad }), /: deadlineMs must be/, `deadlineMs ${String(bad)}`);
+  }
   assert.equal(new Client({ apiKey: KEY, timeoutMs: Infinity }).timeoutMs, 2_147_483_647);
   const mem = new Client({ apiKey: KEY });
-  assert.equal(mem.withTimeout(NaN).timeoutMs, 30_000);
+  assert.throws(() => mem.withTimeout(NaN), /: timeoutMs must be/);
   assert.equal(mem.withDeadline(0).deadlineMs, undefined);
 });
 
@@ -3076,7 +3127,7 @@ test("a relative baseUrl where the runtime has no page constructs, and its first
     for (const rel of ["/api/wos", "./api", "mock", "api.wontopos.com", "", "//u:hunter2@proxy.example.com"]) {
       const mem = new Client({ apiKey: KEY, baseUrl: rel, maxRetries: 3 });
       for (const c of [mem, mem.withModel("scroll-1")]) {
-        const t0 = Date.now();
+        const t0 = CLOCK.now();
         await assert.rejects(
           c.listStores(),
           (e) => {
@@ -3087,7 +3138,7 @@ test("a relative baseUrl where the runtime has no page constructs, and its first
           },
           JSON.stringify(rel),
         );
-        assert.ok(Date.now() - t0 < 150, "the call was retried");
+        assert.ok(CLOCK.now() - t0 < 150, "the call was retried");
       }
     }
     assert.equal(calls, 0, "a request was sent");
@@ -3192,9 +3243,9 @@ test("no error shows the password in a baseUrl's userinfo", async () => {
         throw new Error(`http:/u:hunter2@h ${filler}@x ${u}`);
       },
     });
-    const t0 = Date.now();
+    const t0 = CLOCK.now();
     await assert.rejects(long.stats("alice"), (e) => !e.message.includes("hunter2") && e.message.startsWith("[0] network error: http:/***@h "));
-    assert.ok(Date.now() - t0 < 1_000, `masking took ${Date.now() - t0}ms`);
+    assert.ok(CLOCK.now() - t0 < 1_000, `masking took ${CLOCK.now() - t0}ms`);
   }
   const plain = new Client({
     apiKey: KEY,
@@ -3705,6 +3756,54 @@ test("outside a browser page nothing changes", () => {
   new Client({ apiKey: KEY });
 });
 
+function asWorker(extra, fn) {
+  const names = ["importScripts", "WorkerGlobalScope", "process", "navigator", ...Object.keys(extra)];
+  const saved = Object.fromEntries(names.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  class WorkerGlobalScope {
+    static [Symbol.hasInstance]() {
+      return true;
+    }
+  }
+  const set = (k, value) => Object.defineProperty(globalThis, k, { value, configurable: true, writable: true });
+  set("importScripts", () => {});
+  set("WorkerGlobalScope", WorkerGlobalScope);
+  set("process", undefined);
+  set("navigator", { userAgent: "Mozilla/5.0" });
+  for (const [k, v] of Object.entries(extra)) set(k, v);
+  try {
+    return fn();
+  } finally {
+    for (const k of names) {
+      if (saved[k]) Object.defineProperty(globalThis, k, saved[k]);
+      else delete globalThis[k];
+    }
+  }
+}
+
+test("a browser Web, Shared or Service Worker is refused like a page; Node, Deno, Bun, Cloudflare and Vercel Edge are not", async () => {
+  const { anthropicCaller, openaiCaller } = await import(DIST);
+  asWorker({}, () => {
+    assert.throws(() => new Client({ apiKey: KEY }), /refusing to run in a browser page/);
+    assert.throws(() => anthropicCaller({ apiKey: GUARD_LLM_KEY }), /refusing to put a model key in a browser page/);
+    assert.throws(() => openaiCaller({ baseUrl: "https://api.example.com/v1", model: "m", apiKey: GUARD_LLM_KEY }), /refusing to put a model key/);
+    new Client({ apiKey: KEY, dangerouslyAllowBrowser: true });
+    new Client({ apiKey: KEY, baseUrl: "https://proxy.example.com/wos" });
+  });
+  for (const [runtime, extra] of [
+    ["Node", { process: { versions: { node: "22.0.0" } } }],
+    ["Deno", { Deno: { version: {} } }],
+    ["Bun", { Bun: { version: "1.2.0" } }],
+    ["Cloudflare Workers", { navigator: { userAgent: "Cloudflare-Workers" } }],
+    ["Vercel Edge", { EdgeRuntime: "edge-runtime" }],
+  ]) {
+    asWorker(extra, () => {
+      new Client({ apiKey: KEY });
+      anthropicCaller({ apiKey: GUARD_LLM_KEY });
+    });
+    assert.ok(true, runtime);
+  }
+});
+
 test("recall hands back its lists as typed: rows of another kind are dropped", async () => {
   const body = JSON.stringify({
     short_term: { turns: [{ role: "user", content: "hi" }, "not a turn", null], count: 3 },
@@ -3937,6 +4036,283 @@ test("an empty cursor is left out, in every client", async () => {
     await mem.listMemories("u", { cursor: "c-2" });
     const got = seen.map((s) => JSON.parse(s.body));
     assert.deepEqual([got[0], got[1].cursor], [{ user_id: "u", limit: 100 }, "c-2"]);
+  } finally {
+    server.close();
+  }
+});
+
+const GUARD_LLM_KEY = "sk-ant-test-guards-000000000000000000";
+
+function warningsOf(fn) {
+  const said = [];
+  const orig = console.warn;
+  console.warn = (m) => said.push(String(m));
+  try {
+    fn();
+  } finally {
+    console.warn = orig;
+  }
+  return said;
+}
+
+test("a baseUrl with a query or an anchor is refused, and the error does not print it", async () => {
+  const { anthropicCaller, openaiCaller } = await import(DIST);
+  for (const bad of ["https://api.wontopos.com/?region=eu", "https://api.wontopos.com#top", "https://proxy.example.com/wos?token=abc123", "https://api.wontopos.com?"]) {
+    assert.throws(
+      () => new Client({ apiKey: KEY, baseUrl: bad }),
+      (e) => /^baseUrl has a \? query or a # anchor/.test(e.message) && !e.message.includes("abc123") && !e.message.includes("region"),
+      bad,
+    );
+  }
+  for (const bad of ["https://api.example.com/v1?token=abc123", "https://api.example.com/v1#x", "https://api.example.com?"]) {
+    for (const make of [
+      () => anthropicCaller({ apiKey: GUARD_LLM_KEY, baseUrl: bad }),
+      () => openaiCaller({ baseUrl: bad, model: "m" }),
+      () => new Client({ apiKey: KEY, router: { key: GUARD_LLM_KEY, providerBaseUrl: bad } }),
+    ]) {
+      assert.throws(make, (e) => /^the model provider's base URL has a \? query or a # anchor/.test(e.message) && !e.message.includes("abc123"), bad);
+    }
+  }
+});
+
+test("a base URL refusal that prints the URL leaves out its query, its anchor and its userinfo", async () => {
+  const said = "baseUrl contains whitespace, a backslash or a control character: ";
+  for (const [bad, shown] of [
+    ["https://me:hunter2@api.wontopos.com/v 1?token=abc123#x", "https://***@api.wontopos.com/v 1?"],
+    ["https://api.wontopos.com/v1?token=abc 123", "https://api.wontopos.com/v1?"],
+    ["https://api.wontopos.com/v1#abc\\123", "https://api.wontopos.com/v1#"],
+    ["https://api.wontopos.com/v1?token=abc\u0001123", "https://api.wontopos.com/v1?"],
+  ]) {
+    assert.throws(() => new Client({ apiKey: KEY, baseUrl: bad }), { message: `${said}${JSON.stringify(shown)}` }, bad);
+  }
+  const provider = "the model provider's base URL is not an http(s) URL: ";
+  for (const [bad, shown] of [
+    ["https://me:hunter2@api.example.com/v 1?token=abc123#x", "https://***@api.example.com/v 1?"],
+    ["https://api.example.com/v1?token=abc 123", "https://api.example.com/v1?"],
+    ["https://api.example.com/v1#abc\\123", "https://api.example.com/v1#"],
+  ]) {
+    const caller = { baseUrl: bad, call: async () => ({ text: "" }) };
+    assert.throws(() => new Client({ apiKey: KEY, router: { routerCaller: caller } }), { message: `${provider}${JSON.stringify(shown)}` }, bad);
+    await assert.rejects(new Client({ apiKey: KEY }).sleep("u", { llm: caller }), { message: `${provider}${JSON.stringify(shown)}` }, bad);
+  }
+});
+
+test("a password holding a question mark or a hash is masked before the URL is cut", async () => {
+  const said = "baseUrl contains whitespace, a backslash or a control character: ";
+  for (const bad of ["https://me:hun?ter2@api.wontopos.com/v 1", "https://me:hun#ter2@api.wontopos.com/v 1"]) {
+    assert.throws(() => new Client({ apiKey: KEY, baseUrl: bad }), { message: `${said}"https://***@api.wontopos.com/v 1"` }, bad);
+  }
+  const provider = "the model provider's base URL is not an http(s) URL: ";
+  for (const [bad, shown] of [
+    ["https://me:hun?ter2@api.example.com/v 1", "https://***@api.example.com/v 1"],
+    ["https://me:hun#ter2@api.example.com/v1", "https://***@api.example.com/v1"],
+  ]) {
+    const caller = { baseUrl: bad, call: async () => ({ text: "" }) };
+    assert.throws(() => new Client({ apiKey: KEY, router: { routerCaller: caller } }), { message: `${provider}${JSON.stringify(shown)}` }, bad);
+    await assert.rejects(new Client({ apiKey: KEY }).sleep("u", { llm: caller }), { message: `${provider}${JSON.stringify(shown)}` }, bad);
+  }
+});
+
+test("the query refusal tells each caller the base URL it takes", async () => {
+  const { anthropicCaller, openaiCaller } = await import(DIST);
+  const said = "the model provider's base URL has a ? query or a # anchor: give ";
+  for (const bad of ["https://api.openai.com/v1?api-version=1", "https://api.openai.com/v1#chat"]) {
+    assert.throws(() => openaiCaller({ baseUrl: bad, model: "m" }), { message: `${said}the base URL without them, e.g. https://api.openai.com/v1.` }, bad);
+    for (const make of [
+      () => anthropicCaller({ apiKey: GUARD_LLM_KEY, baseUrl: bad }),
+      () => new Client({ apiKey: KEY, router: { key: GUARD_LLM_KEY, providerBaseUrl: bad } }),
+    ]) {
+      assert.throws(make, { message: `${said}the API origin without them, e.g. https://api.anthropic.com.` }, bad);
+    }
+  }
+});
+
+test("the plain-HTTP warning comes once per base URL, not once per copy", () => {
+  const said = warningsOf(() => {
+    const mem = new Client({ apiKey: KEY, baseUrl: "http://wos-proxy.example.com" });
+    mem.withUser("a").withModel("tablet-2").withDeadline(5000);
+    new Client({ apiKey: KEY, baseUrl: "http://wos-proxy.example.com/" });
+    new Client({ apiKey: KEY, baseUrl: "http://other-proxy.example.com" });
+  });
+  assert.equal(said.filter((w) => w.includes("so the API key travels unencrypted")).length, 2);
+});
+
+test("a model key over plain HTTP to a remote host warns once per base; loopback and keyless stay quiet", async () => {
+  const { anthropicCaller, openaiCaller } = await import(DIST);
+  const said = warningsOf(() => {
+    anthropicCaller({ apiKey: GUARD_LLM_KEY, baseUrl: "http://llm.example.com" });
+    anthropicCaller({ apiKey: GUARD_LLM_KEY, baseUrl: "http://llm.example.com/" });
+    openaiCaller({ baseUrl: "http://llm.example.com/v1", model: "m", apiKey: GUARD_LLM_KEY });
+    openaiCaller({ baseUrl: "http://other.example.com/v1", model: "m" });
+    anthropicCaller({ apiKey: GUARD_LLM_KEY, baseUrl: "http://127.0.0.1:9" });
+    openaiCaller({ baseUrl: "http://localhost:11434/v1", model: "m", apiKey: GUARD_LLM_KEY });
+    new Client({ apiKey: KEY, router: { key: GUARD_LLM_KEY, providerBaseUrl: "http://router.example.com" } });
+  });
+  assert.deepEqual(
+    said.filter((w) => w.includes("model key")),
+    Array(3).fill("wontopos: the model provider's base URL uses plain HTTP on a non-local host, so the model key travels unencrypted. Use https://."),
+  );
+});
+
+test("a stacked gzip answer is inflated as it streams and stops at the size cap", async () => {
+  const zlib = await import("node:zlib");
+  const bomb = zlib.gzipSync(zlib.gzipSync(Buffer.alloc(80 << 20)));
+  const { server, base } = await scriptedServer([[200, { "Content-Encoding": "gzip, gzip" }, bomb]]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 0 });
+    await assert.rejects(mem.stats("alice"), /response too large/);
+  } finally {
+    server.close();
+  }
+});
+
+test("the two kinds of key cannot be swapped, and the error never prints the key", async () => {
+  const { anthropicCaller, openaiCaller } = await import(DIST);
+  const providerKey = "sk-ant-api03-guards-000000000000000000";
+  const wosKey = "wos-test-guards-0000000000000000000000";
+  assert.throws(
+    () => new Client({ apiKey: providerKey }),
+    (e) => e.message === "apiKey starts with sk-, so it is a model provider's key: give the Wontopos key here (it starts with wos-).",
+  );
+  for (const [what, make] of [
+    ["apiKey", () => anthropicCaller({ apiKey: wosKey })],
+    ["apiKey", () => openaiCaller({ baseUrl: "https://api.example.com/v1", model: "m", apiKey: wosKey })],
+    ["router.key", () => new Client({ apiKey: KEY, router: { key: wosKey } })],
+    ["router.skillKey", () => new Client({ apiKey: KEY, router: { key: GUARD_LLM_KEY, skillKey: wosKey } })],
+  ]) {
+    assert.throws(
+      make,
+      (e) => e.message === `${what} starts with wos-, so it is a Wontopos key: a Wontopos key never goes to a model provider. Give the provider's own key.`,
+      what,
+    );
+  }
+  const own = "own-gateway-key-000000000000000000";
+  for (const router of [{ key: own }, { key: GUARD_LLM_KEY, skillKey: own }]) {
+    assert.throws(
+      () => new Client({ apiKey: own, router }),
+      (e) => /^router\.(key|skillKey) is this client's Wontopos key: a Wontopos key never goes to a model provider\. Give the provider's own key\.$/.test(e.message),
+    );
+  }
+});
+
+test("a key prints as its last 4 characters, and only from 24 characters up, in every type that prints one", async () => {
+  const { anthropicCaller, openaiCaller } = await import(DIST);
+  const long = "wos-live-0123456789abcdeWXYZ";
+  const at24 = "wos-live-0123456789aWXYZ";
+  const at23 = "wos-live-0123456789WXYZ";
+  assert.deepEqual([long.length, at24.length, at23.length], [28, 24, 23]);
+  for (const [key, shown] of [[long, "***WXYZ"], [at24, "***WXYZ"], [at23, "***"]]) {
+    const mem = new Client({ apiKey: key });
+    assert.equal(mem.toJSON().apiKey, shown, key);
+    assert.ok(inspect(mem).endsWith(`apiKey=${shown})`), inspect(mem));
+    const a = anthropicCaller({ apiKey: key.replace("wos-", "sk-a") });
+    assert.equal(a.toJSON().apiKey, shown);
+    assert.ok(inspect(a).endsWith(`apiKey=${shown})`), inspect(a));
+    const o = openaiCaller({ baseUrl: "https://api.example.com/v1", model: "m", apiKey: key.replace("wos-", "sk-o") });
+    assert.equal(o.toJSON().apiKey, shown);
+    assert.ok(inspect(o).endsWith(`apiKey=${shown})`), inspect(o));
+  }
+});
+
+test("a printed base URL masks only the userinfo of its authority", () => {
+  const plain = new Client({ apiKey: KEY, baseUrl: "https://proxy.example.com/team@api.wontopos.com" });
+  for (const view of [JSON.stringify(plain), inspect(plain)]) {
+    assert.ok(view.includes("https://proxy.example.com/team@api.wontopos.com"), view);
+  }
+  const login = new Client({ apiKey: KEY, baseUrl: "https://user:pw@proxy.example.com/a@b" });
+  for (const view of [JSON.stringify(login), inspect(login)]) {
+    assert.ok(view.includes("https://***@proxy.example.com/a@b") && !view.includes("pw"), view);
+  }
+});
+
+test("a deadline, timeout or retry count that is not a number, is NaN or is negative is refused, naming it", () => {
+  for (const [opts, said] of [
+    [{ timeoutMs: -1 }, "timeoutMs must be a number of milliseconds, 0 or more, got -1."],
+    [{ timeoutMs: NaN }, "timeoutMs must be a number of milliseconds, 0 or more, got NaN."],
+    [{ timeoutMs: "5000" }, 'timeoutMs must be a number of milliseconds, 0 or more, got "5000".'],
+    [{ deadlineMs: -500 }, "deadlineMs must be a number of milliseconds, 0 or more, got -500."],
+    [{ deadlineMs: true }, "deadlineMs must be a number of milliseconds, 0 or more, got true."],
+    [{ maxRetries: -1 }, "maxRetries must be a whole number, 0 or more, got -1."],
+    [{ maxRetries: 1.5 }, "maxRetries must be a whole number, 0 or more, got 1.5."],
+    [{ maxRetries: Infinity }, "maxRetries must be a whole number, 0 or more, got Infinity."],
+    [{ maxRetries: "0" }, 'maxRetries must be a whole number, 0 or more, got "0".'],
+    [{ retries: NaN }, "retries must be a whole number, 0 or more, got NaN."],
+  ]) {
+    assert.throws(() => new Client({ apiKey: KEY, ...opts }), (e) => e.message === said, JSON.stringify(Object.keys(opts)));
+  }
+  const mem = new Client({ apiKey: KEY, deadlineMs: 5_000 });
+  const endsAt = Date.now() - 250;
+  assert.throws(() => mem.withDeadline(endsAt - Date.now()), /: deadlineMs must be a number of milliseconds, 0 or more, got -2\d\d\.$/);
+  assert.throws(() => mem.withTimeout(-1), /: timeoutMs must be/);
+  assert.throws(() => mem.withRetries(-1), /: maxRetries must be/);
+  assert.equal(mem.withDeadline(0).deadlineMs, undefined, "0 still means no deadline");
+  assert.equal(new Client({ apiKey: KEY, timeoutMs: 0 }).timeoutMs, 30_000, "0 still means the default timeout");
+  assert.equal(new Client({ apiKey: KEY, timeoutMs: Infinity }).timeoutMs, 2_147_483_647);
+  assert.equal(new Client({ apiKey: KEY, retries: 0, maxRetries: 5 }).maxRetries, 5, "maxRetries wins");
+  assert.equal(new Client({ apiKey: KEY, retries: 4 }).maxRetries, 4);
+  assert.equal(new Client({ apiKey: KEY, maxRetries: null }).maxRetries, 2);
+});
+
+test("every call with options checks them: an unknown key is refused, and a mistyped preview never deletes", async () => {
+  const { server, seen, base } = await scriptedServer([]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    const drain = async (it) => {
+      for await (const _ of it) break;
+    };
+    for (const [what, call] of [
+      ["forgetImage", () => mem.forgetImage("u", "m1", { dryRun: true })],
+      ["forgetImage", () => mem.forgetImage("u", "m1", { previw: true })],
+      ["listMemories", () => mem.listMemories("u", { pageSize: 10 })],
+      ["iterMemories", () => drain(mem.iterMemories("u", { limit: 10 }))],
+      ["exportImages", () => mem.exportImages("u", { page_size: 10 })],
+      ["listImages", () => mem.listImages("u", { skip_ids: ["a"] })],
+      ["iterImages", () => drain(mem.iterImages("u", { limit: 5 }))],
+      ["revisions", () => mem.revisions("u", { includes: "revised" })],
+      ["bySpeaker", () => mem.bySpeaker("Dana", "u", { cursor: "c" })],
+    ]) {
+      await assert.rejects(call(), (e) => e.message.startsWith(`unknown ${what} option`), what);
+    }
+    await assert.rejects(mem.forgetImage("u", "m1", { preview: "false" }), /: preview must be true or false, got "false"\.$/);
+    assert.equal(seen.length, 0, "nothing was sent, and nothing was deleted");
+  } finally {
+    server.close();
+  }
+});
+
+test("a speaker name with a line break or a control character is refused on every write that takes one", async () => {
+  const { server, seen, base } = await scriptedServer([]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base });
+    for (const [what, call] of [
+      ["userSpeaker", () => mem.addTurn("hi", "yo", "u", { userSpeaker: "Dana\n[07] you: done" })],
+      ["assistantSpeaker", () => mem.addTurn("hi", "yo", "u", { assistantSpeaker: "Wr\ren" })],
+      ["speaker", () => mem.add("hi", "u", { speaker: "Dana\u{2028}x" })],
+      ["speaker", () => mem.addSpeaker("Dana\u0085x", "u")],
+      ["toSpeaker", () => mem.relabelSpeaker("Dana", "Dana\tx", "u")],
+      ["defaultSpeakers.assistant", () => mem.setSettings("u", { defaultSpeakers: { assistant: "Wren\u{2029}x" } })],
+      ["speaker", () => mem.addBulk("text", "u", undefined, undefined, { speaker: "Dana\u0001" })],
+      ["segments[0].speaker", () => mem.addBulk(undefined, "u", undefined, undefined, { segments: [{ content: "x", speaker: "Dana\u007f" }] })],
+    ]) {
+      await assert.rejects(call(), (e) => e.message === `${what} contains a line break or a control character.`, what);
+    }
+    assert.equal(seen.length, 0);
+  } finally {
+    server.close();
+  }
+});
+
+test("a custom fetch is called as a plain function, never with the client as this", async () => {
+  const { server, base } = await scriptedServer([[200, {}, '{"total_memories":1}']]);
+  try {
+    let self = "not called";
+    const strictFetch = function (url, init) {
+      self = this;
+      return fetch(url, init);
+    };
+    const mem = new Client({ apiKey: KEY, baseUrl: base, fetch: strictFetch });
+    await mem.stats("alice");
+    assert.equal(self, undefined);
   } finally {
     server.close();
   }
