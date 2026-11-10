@@ -17,6 +17,7 @@ function expand(v) {
   if (v && typeof v === "object" && !Array.isArray(v) && "$repeat" in v) return (v.prefix ?? "") + v.$repeat.repeat(v.times);
   if (Array.isArray(v)) return v.map(expand);
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, expand(x)]));
+  if (typeof v === "string") return v.replaceAll("@@ASSISTANT@@", "Wren");
   return v;
 }
 
@@ -256,11 +257,15 @@ async function provider(t, answers, kind, { fail, redirect, raw } = {}) {
   return { seen, caller };
 }
 
-function checkNight(scenario, n, night, res, svc, start, reads = []) {
+function checkNight(scenario, n, night, res, svc, start, reads = [], calls = []) {
   const where = `${scenario.name} night ${n + 1}`;
   const want = night.expect;
   for (const s of want.read_has ?? []) assert.ok(reads.some((r) => r.includes(s)), `${where}: a reader was sent ${JSON.stringify(s)}`);
   for (const s of want.read_lacks ?? []) assert.ok(!reads.some((r) => r.includes(s)), `${where}: no reader was sent ${JSON.stringify(s)}`);
+  for (const s of want.calls_have ?? []) assert.ok(calls.some((c) => c.includes(s)), `${where}: a model call held ${JSON.stringify(s)}`);
+  for (const s of want.calls_lack ?? []) assert.ok(!calls.some((c) => c.includes(s)), `${where}: no model call held ${JSON.stringify(s)}`);
+  const latest = Object.keys(svc.slots).map((k) => svc.latest(k)?.body).filter((b) => typeof b === "string");
+  for (const s of want.files_have ?? []) assert.ok(latest.some((f) => f.includes(s)), `${where}: a file holds ${JSON.stringify(s)}`);
   const core = svc.latest(0)?.body ?? "";
   const files = Object.values(svc.slots).flat().map((v) => `${v.body}\n${v.title}`);
   const notes = JSON.stringify(svc.notes ?? {});
@@ -290,12 +295,16 @@ test("sleep attacks: planted instructions meet the rules as the fixture says", a
   for (const scenario of FIX.scenarios) {
     const [svc, mem] = await served(t);
     if (scenario.before?.proposals) svc.notes = { proposals: structuredClone(scenario.before.proposals), mixed: [] };
+    for (const [k, f] of Object.entries(scenario.before?.files ?? {})) {
+      svc.slots[k].push({ version: 1, title: f.title ?? "", body: f.body, tokens: tok(f.body), evidence: [], day: f.day ?? null });
+    }
     for (const [n, night] of scenario.nights.entries()) {
       svc.give(nightRows(n, night));
       const start = svc.seen.length;
       const model = fixtureModel(night.answers);
       const res = await mem.sleep("u", { llm: model.caller, prompt: scenario.prompt, today: night.today, settings: settingsOf(scenario) });
-      checkNight(scenario, n, night, res, svc, start, model.calls.filter(([system]) => system.includes(" you read part ")).map(([, user]) => user));
+      checkNight(scenario, n, night, res, svc, start, model.calls.filter(([system]) => system.includes(" you read part ")).map(([, user]) => user),
+        model.calls.map(([system, user]) => `${system}\n${user}`));
     }
   }
 });

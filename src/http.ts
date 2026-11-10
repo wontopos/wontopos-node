@@ -126,8 +126,9 @@ function retryAfterMs(v: string | null, now = Date.now()): number | undefined {
 
 const BRIEF_BODY_MS = 1_000;
 
+const steady = (globalThis as { performance?: { now?: () => number } }).performance;
 const timing = {
-  now: (): number => Date.now(),
+  now: (): number => (typeof steady?.now === "function" ? steady.now() : Date.now()),
   pause: (ms: number): number => ms,
   timer: (fn: () => void, ms: number): (() => void) => {
     const t = setTimeout(fn, ms);
@@ -324,7 +325,13 @@ function instantMs(s: unknown): number | undefined {
 }
 
 function keptIn(text: string): string {
-  return text.replace(/\r\n|[\r\n\u0085\u{2028}\u{2029}]/gu, "\n    ");
+  return text.replace(/\r\n|[\r\n\u000b\u000c\u001c-\u001e\u0085\u{2028}\u{2029}]/gu, "\n    ");
+}
+
+function dayMinute(ms: number): [string, string] {
+  const iso = new Date(ms).toISOString();
+  const t = iso.indexOf("T");
+  return [iso.slice(0, t), iso.slice(t + 1, t + 6)];
 }
 
 const IGNORABLE =
@@ -377,7 +384,7 @@ export {
   BASE_URL_ENDS, BRIEF_BODY_MS, BROWSER_REFUSAL, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSPORTS, IDEMPOTENT_METHODS,
   MAX_RESPONSE_BYTES, MAX_RETRY_WAIT_MS, NO_BODY_STATUS, READ_POSTS, RETRY_ALWAYS, RETRY_IF_IDEMPOTENT, STORE_PATHS,
   STORE_TIMEOUT_MS, SlowBody, addCapped, asList, asObj, asPageRelative, causeCode, cleanDetails, cleanServerText, defaultTransport,
-  discard, finiteNumbers, httpDateMs, inBrowserPage, instantMs, isConnectFailure, isServiceHost, keptIn,
+  dayMinute, discard, finiteNumbers, httpDateMs, inBrowserPage, instantMs, isConnectFailure, isServiceHost, keptIn,
   maskBase, maskKey, maskUserinfo, notAUrl, pageHref, parseBase, parseErrorText, parseRateLimit, plainHttpOnce,
   retryAfterMs, shownBase, shownSpeaker, timing, tryUrl, warnIfRetiring, warnedRetirements, weekUsedOf,
 };

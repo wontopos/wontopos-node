@@ -1,6 +1,6 @@
 {
   "name": "wontopos",
-  "version": "2.2.50",
+  "version": "2.2.51",
   "description": "Wontopos \u2014 long-term memory for AI agents. Identical recall in every language, ~100\u00d7 lower LLM bill.",
   "keywords": [
     "memory",
@@ -42,7 +42,7 @@
   },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && tsc -p tsconfig.types.json && tsc -p tsconfig.cjs.json && node -e \"const fs=require('fs');fs.writeFileSync('dist/cjs/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n');fs.copyFileSync('dist/wontopos.d.ts','dist/cjs/wontopos.d.cts');fs.copyFileSync('dist/sleep.d.ts','dist/cjs/sleep.d.ts');fs.copyFileSync('dist/types.d.ts','dist/cjs/types.d.ts')\"",
-    "test": "npm run build && node --test tests/client.test.mjs tests/rooms-work.test.mjs tests/router.test.mjs tests/sleep.test.mjs tests/sleep-attacks.test.mjs tests/hunt-transport.test.mjs tests/hunt-api.test.mjs tests/hunt-tools.test.mjs tests/hunt-router.test.mjs tests/hunt-sleep.test.mjs tests/hunt-packaging.test.mjs tests/hunt-knobs.test.mjs tests/hunt-parity.test.mjs tests/hunt-livefix.test.mjs tests/s2live.test.mjs tests/cov.test.mjs tests/cjs.test.cjs",
+    "test": "npm run build && node --test tests/client.test.mjs tests/rooms-work.test.mjs tests/router.test.mjs tests/sleep.test.mjs tests/sleep-attacks.test.mjs tests/hunt-transport.test.mjs tests/hunt-api.test.mjs tests/hunt-tools.test.mjs tests/hunt-router.test.mjs tests/hunt-sleep.test.mjs tests/hunt-packaging.test.mjs tests/hunt-knobs.test.mjs tests/hunt-parity.test.mjs tests/hunt-livefix.test.mjs tests/s2live.test.mjs tests/v2251.test.mjs tests/cov.test.mjs tests/cjs.test.cjs",
     "prepublishOnly": "npm run build && node scripts/pre-publish.mjs"
   },
   "devDependencies": {

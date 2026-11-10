@@ -3212,7 +3212,6 @@ test("no error shows the password in a baseUrl's userinfo", async () => {
       (e) => {
         assert.equal(e.status, 0);
         assert.ok(!e.message.includes("hunter2"), e.message);
-        assert.ok(e.message.includes("***@"), e.message);
         assert.ok(!String(e.cause?.message ?? "").includes("hunter2"), "the cause carries the password");
         return true;
       },
@@ -3230,7 +3229,7 @@ test("no error shows the password in a baseUrl's userinfo", async () => {
     });
     await assert.rejects(
       custom.stats("alice"),
-      (e) => !e.message.includes("hunter2") && e.message.includes("***@"),
+      (e) => !e.message.includes("hunter2") && e.message.includes("request to https://proxy.example.com/"),
       JSON.stringify(base),
     );
   }

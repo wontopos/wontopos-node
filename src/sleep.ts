@@ -4,7 +4,7 @@ import type {
 } from "./wontopos.js";
 
 /** The version of the sleep's texts, steps and rules. */
-export const SLEEP_VERSION = "1.0.1";
+export const SLEEP_VERSION = "1.0.2";
 
 /** @internal */
 export const SLEEP_DIGEST = `You are the sleep of {being}. While {being} sleeps, you read part {k} of {n} of what happened
@@ -647,6 +647,11 @@ function sleepWhen(raw: unknown): [string, number] | undefined {
   return [`${y}-${mo}-${d} ${h ?? "00"}:${mi ?? "00"}`, (t * 1_000_000 + us) / 1_000_000];
 }
 
+function sleepWho(speaker: string, being: string): string {
+  const low = speaker.toLowerCase();
+  return low === being.trim().toLowerCase() || low === "user" || speaker.includes(" · ") ? `"${speaker}"` : speaker;
+}
+
 function sleepMemories(rows: Record<string, unknown>[], being: string, assistant: string, lineTime: string,
   count?: (t: string) => number): SleepLine[] {
   const speakerOf = (r: Record<string, unknown>): string => (typeof r.speaker === "string" ? r.speaker.trim() : "");
@@ -662,7 +667,7 @@ function sleepMemories(rows: Record<string, unknown>[], being: string, assistant
     const size = count ? count(text) : isWhole(n) && n >= 0 ? n : sleepTokens(text);
     return {
       eid: `e${i + 1}`, mid: typeof r.id === "string" ? r.id : "", at: when[0],
-      who: mine ? being : many && speaker ? speaker : "user", mine, text, tokens: size + SLEEP_LINE_FRAME,
+      who: mine ? being : many && speaker ? sleepWho(speaker, being) : "user", mine, text, tokens: size + SLEEP_LINE_FRAME,
       ts: when[1],
     };
   });
@@ -706,10 +711,11 @@ function sleepParts(mems: SleepLine[], limit: number): SleepLine[][] {
   return out;
 }
 
-const SLEEP_BREAK = /\r\n|[\r\n\u0085\u{2028}\u{2029}]/gu;
+const SLEEP_BREAK = /\r\n|[\r\n\u000b\u000c\u001c-\u001e\u0085\u{2028}\u{2029}]/gu;
+const SLEEP_RARE = /\r(?!\n)|[\u000b\u000c\u001c-\u001e\u0085\u{2028}\u{2029}]/gu;
 const SLEEP_CONTROL = /\r\n|[\u0000-\u001f\u007f-\u009f\u{2028}\u{2029}]/gu;
 const SLEEP_CONTROL_IN = /[\u0000-\u001f\u007f-\u009f\u{2028}\u{2029}]/u;
-const SLEEP_TAG = /<(?=\/?(?:memories|core|boxes|box|proposals|ripe|items|section|tonight|as it stood))/g;
+const SLEEP_TAG = /<(?=\/?(?:memories|core|boxes|box|proposals|ripe|items|section|tonight|as it stood))/gi;
 
 function sleepUntag(text: string): string {
   return text.replace(SLEEP_TAG, "\u{2039}");
@@ -717,6 +723,14 @@ function sleepUntag(text: string): string {
 
 function sleepShown(text: string): string {
   return sleepUntag(text.replace(SLEEP_BREAK, "\n    "));
+}
+
+function sleepKept(text: string): string {
+  return sleepUntag(text.replace(SLEEP_RARE, "\n    "));
+}
+
+function sleepNamed(text: unknown): string {
+  return sleepUntag(pyStr(text).replace(SLEEP_CONTROL, " "));
 }
 
 function sleepLines(mems: SleepLine[]): string {
@@ -801,6 +815,18 @@ function sectionMap(body: string): Map<string, string> {
   return new Map(sleepSections(body));
 }
 
+function sleepCore(body: string): string {
+  const lines = body.split("\n");
+  const first = lines.findIndex((ln) => ln.startsWith("## "));
+  const lead = pyStrip(lines.slice(0, first < 0 ? lines.length : first).join("\n"));
+  if (!lead) return body;
+  const secs = sleepSections(body);
+  const at = secs.findIndex(([h]) => h === SLEEP_ME);
+  if (at >= 0) secs[at] = [SLEEP_ME, pyStrip(`${lead}\n${secs[at][1]}`)];
+  else secs.unshift([SLEEP_ME, lead]);
+  return sleepJoin(secs);
+}
+
 function sleepJoin(secs: [string, string][]): string {
   return pyStrip(secs.filter(([h]) => h).map(([h, t]) => pyRstrip(`## ${h}\n${t}`)).join("\n\n")) + (secs.length ? "\n" : "");
 }
@@ -851,7 +877,7 @@ function sleepAge(day: unknown, today: number): string {
   const d = sleepDate(day);
   if (d === undefined) return "";
   const n = today - d;
-  return `last edited ${pyStr(day)}, ${n === 0 ? "today" : `${n} days ago`}`;
+  return `last edited ${pyStr(day)}, ${n <= 0 ? "today" : n === 1 ? "1 day ago" : `${n} days ago`}`;
 }
 
 /** @internal */
@@ -873,17 +899,19 @@ export function sleepHasBody(f: SleepViewFile): boolean {
 export function sleepBoxIndex(view: SleepViewFile[], today: number): string {
   return SLEEP_BOXES.map((s) => {
     const f = view[s];
-    return `${s}. ${f.title || "(empty)"}` + (sleepHasBody(f) ? ` (${sleepAge(f.day, today)})` : "");
+    const age = sleepHasBody(f) ? sleepAge(f.day, today) : "";
+    return `${s}. ${sleepNamed(f.title) || "(empty)"}` + (age ? ` (${age})` : "");
   }).join("\n");
 }
 
 /** @internal */
 export function sleepRender(view: SleepViewFile[], today: number): string {
   const core = view[0];
-  const head = pyTruthy(core.day) ? `<core ${sleepAge(core.day, today)}>` : "<core>";
-  const secs = sleepSections(core.body || "");
+  const age = sleepAge(core.day, today);
+  const head = age ? `<core ${age}>` : "<core>";
+  const secs = sleepSections(sleepCore(core.body || ""));
   const body = pyStrip(sleepJoin([...secs.filter(([h]) => h === SLEEP_ME), ...secs.filter(([h]) => h !== SLEEP_ME)]));
-  return `${head}\n${body}\n</core>\n<boxes>\n${sleepBoxIndex(view, today)}\n</boxes>`;
+  return `${head}\n${sleepKept(body)}\n</core>\n<boxes>\n${sleepBoxIndex(view, today)}\n</boxes>`;
 }
 
 /** @internal */
@@ -900,7 +928,8 @@ export function sleepBoxPick(view: SleepViewFile[], which: unknown): number | un
 export function sleepBoxText(s: number, f: SleepViewFile, today: number): string {
   const body = f.body || "";
   if (!pyStrip(body)) return `Box ${s} is empty.`;
-  return `<box ${s} name="${f.title}" ${sleepAge(f.day, today)}>\n${pyStrip(body)}\n</box>`;
+  const age = sleepAge(f.day, today);
+  return `<box ${s} name="${sleepNamed(f.title)}"${age ? ` ${age}` : ""}>\n${sleepKept(pyStrip(body))}\n</box>`;
 }
 
 /** @internal */
@@ -1394,7 +1423,7 @@ async function sleepReadParts(run: SleepRun, mems: SleepLine[], core: string,
   const many = sleepManyPeople(mems);
   const read = async (k: number, part: SleepLine[]): Promise<[SleepItem[], number, SleepMark[], number | undefined]> => {
     const system = pyFormat(sleepForPeople(SLEEP_DIGEST, "digest", many), { being: run.being, k, n: parts.length });
-    const user = `<core>\n${core || "(empty)"}\n</core>\n<boxes>\n${titles}\n</boxes>\n<memories>\n${sleepLines(part)}\n</memories>`;
+    const user = `<core>\n${sleepKept(core) || "(empty)"}\n</core>\n<boxes>\n${titles}\n</boxes>\n<memories>\n${sleepLines(part)}\n</memories>`;
     let got: unknown;
     for (const attempt of [1, 2, 3]) {
       const key = `read ${k}` + (attempt === 1 ? "" : ` again ${attempt}`);
@@ -1436,8 +1465,8 @@ async function sleepSettle(run: SleepRun, core: string, sec: string, given: stri
   const held = old.split("\n").filter((ln) => pyStrip(ln)).map(pyStrip);
   const tonight = text.split("\n").filter((ln) => pyStrip(ln)).map(pyStrip);
   if (held.filter((ln) => !tonight.includes(ln)).length <= SLEEP_OVERTURN) return [text, "kept"];
-  const numbered = held.map((ln, i) => `${i + 1}. ${ln}`).join("\n");
-  const g = await sleepAskJson(run.merge, pyFormat(SLEEP_SETTLE, { being: run.being, name: sec }),
+  const numbered = held.map((ln, i) => `${i + 1}. ${sleepKept(ln)}`).join("\n");
+  const g = await sleepAskJson(run.merge, pyFormat(SLEEP_SETTLE, { being: run.being, name: sleepNamed(sec) }),
     `<as it stood>\n${numbered}\n</as it stood>\n<tonight>\n${text}\n</tonight>`, `settle ${sec}`, run.log);
   if (!isPlainObject(g)) return [undefined, "unshaped"];
   const asLine = (x: unknown): string => {
@@ -1470,7 +1499,7 @@ type SleepRefusal = { edit?: unknown; proposal?: unknown; why: string };
 type SleepRoomMade = { file: number; before: number; after: number | null };
 
 function sleepWhere(next: SleepFileState[], k: number): string {
-  return k === 0 ? "core" : `box "${next[k].title}"`;
+  return k === 0 ? "core" : `box "${sleepNamed(next[k].title)}"`;
 }
 
 function sleepCap(s: SleepSettings, k: number): number {
@@ -1495,7 +1524,7 @@ async function sleepRoom(run: SleepRun, next: SleepFileState[], files: SleepFile
   const coreWay = k === 0 ? ', or move people who matter less to a box (say which, under "moved")' : "";
   const moved = k === 0 ? ', "moved": [{"section": "<heading>", "to": "1|2|3|4"}]' : "";
   const g = (await sleepAskJson(run.merge, pyFormat(SLEEP_ROOM, { being: run.being, where, used: usedNow, cap, core_way: coreWay, moved }),
-    `<${where}>\n${next[k].body}\n</${where}>`, `room ${k}`, run.log)) ?? {};
+    `<${where}>\n${sleepKept(next[k].body)}\n</${where}>`, `room ${k}`, run.log)) ?? {};
   let body = pyStrip(pyStr(pyOr(g.text, "")));
   body = body.startsWith("## ") ? sleepJoin(sleepSections(body)) : "";
   const had = sectionMap(next[0].body);
@@ -1636,7 +1665,7 @@ async function sleepDoneFlow(host: SleepHost, run: SleepRun, sleepId: string): P
 }
 
 function sleepTitles(files: { title: string }[]): string {
-  return SLEEP_BOXES.map((k) => `${k}: ${files[k].title || "(empty)"}`).join("\n");
+  return SLEEP_BOXES.map((k) => `${k}: ${sleepNamed(files[k].title) || "(empty)"}`).join("\n");
 }
 
 async function sleepAssistant(host: SleepHost, run: SleepRun): Promise<string> {
@@ -1667,7 +1696,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
   const nowSecs = sleepDayStart(today);
   const day = cpSlice(today, 0, 10);
   const view = sleepView(await host.post("/api/v1/memory/self", { user_id: host.store }));
-  const files: SleepFileState[] = [{ title: view[0].title, body: view[0].body || "", version: view[0].version, day: view[0].day }];
+  const files: SleepFileState[] = [{ title: view[0].title, body: sleepCore(view[0].body || ""), version: view[0].version, day: view[0].day }];
   for (const k of SLEEP_BOXES) {
     files[k] = { title: "", body: "", version: 0, day: null };
     if (view[k].version) {
@@ -1732,16 +1761,17 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
   const touch = (k: number, h: string): void => void touched.set(`${k}\u0000${h}`, [k, h]);
   let unmerged = false;
   if (items.length || ripe.length) {
-    const blocks = SLEEP_BOXES.map((k) => `<box ${k} name="${files[k].title || "(empty)"}" size="${thou(count(files[k].body))} of ` +
-      `${thou(s.boxTokens)} tokens">\n${files[k].body || "(empty)"}\n</box ${k}>`).join("\n");
+    const blocks = SLEEP_BOXES.map((k) => `<box ${k} name="${sleepNamed(files[k].title) || "(empty)"}" size="${thou(count(files[k].body))} of ` +
+      `${thou(s.boxTokens)} tokens">\n${sleepKept(files[k].body) || "(empty)"}\n</box ${k}>`).join("\n");
+    const said = (p: SleepProposal): string => `${sleepNamed(p.id)}: ${sleepShown(pyStr(p.text))}`;
     const propText = proposals.filter((p) => !pyTruthy(p.applied))
-      .map((p) => `${pyStr(p.id)}: ${pyStr(p.text)} (seen in ${pyStr(p.sleeps)} sleeps since ${pyStr(p.first_day)})`).join("\n") || "(none)";
-    const ripeText = ripe.map((p) => `${pyStr(p.id)}: ${pyStr(p.text)}`).join("\n") || "(none)";
+      .map((p) => `${said(p)} (seen in ${pyStr(p.sleeps)} sleeps since ${sleepNamed(p.first_day)})`).join("\n") || "(none)";
+    const ripeText = ripe.map(said).join("\n") || "(none)";
     const system = pyFormat(sleepForPeople(SLEEP_MERGE, "merge", sleepManyPeople(mems)), {
       being, me, today, core_used: count(core), core_cap: s.coreTokens, box_cap: s.boxTokens,
       self_rule: pyFormat(SLEEP_SELF_RULE, { me, being }),
     });
-    const user = `<core>\n${core || "(empty)"}\n</core>\n${blocks}\n<proposals>\n${propText}\n</proposals>\n` +
+    const user = `<core>\n${sleepKept(core) || "(empty)"}\n</core>\n${blocks}\n<proposals>\n${propText}\n</proposals>\n` +
       `<ripe>\n${ripeText}\n</ripe>\n<items>\n${pyJsonIndent0(items)}\n</items>`;
     let got = await sleepAskJsonLogged(run.merge, system, user, "merge", log);
     if (got === undefined) {
@@ -1757,6 +1787,8 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
       const n = pyStrip(name).toLowerCase();
       return tonight.some((t) => sleepSpeaksOf(t, n));
     };
+    const own = new Set([me, being, assistant].map((x) => pyStrip(x).toLowerCase()).filter((x) => x));
+    const selfish = (name: string): boolean => own.has(pyStrip(name).toLowerCase());
     for (const e of Array.isArray(g.edits) ? g.edits : []) {
       let why: string | undefined;
       if (!isPlainObject(e)) continue;
@@ -1773,7 +1805,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         why = "no evidence, or evidence not in this sleep";
       } else if (op === "rewrite") {
         const named = sleepHeading(pyStr(pyOr(e.section, "")));
-        const sec = slot === 0 && named.toLowerCase() === me.toLowerCase() ? me : named;
+        const sec = slot === 0 && selfish(named) ? me : named;
         if (!sec || !pyStrip(pyStr(pyOr(e.text, "")))) {
           why = "rewrite needs a section and text";
         } else if (slot === 0 && sec === me && !ripeIds.has(e.ripe)) {
@@ -1809,17 +1841,27 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         } else {
           next[slot].body = body.startsWith("## ") ? body : sleepSetSection("", "Notes", body);
           next[slot].title = cpSlice(title, 0, 80);
+          const here = new Map<string, string>();
+          for (const [src, dst, movedSec, movedText] of carried) {
+            if (dst === slot) here.set(movedSec, movedText);
+            else if (src === slot) here.delete(movedSec);
+          }
+          for (const [movedSec, movedText] of here) {
+            if (!sectionMap(next[slot].body).has(movedSec)) next[slot].body = sleepSetSection(next[slot].body, movedSec, movedText);
+          }
           for (const [h] of sleepSections(next[slot].body)) touch(slot, h);
         }
       } else if (op === "move_section") {
         const to = slotOf.get(pyStr(e.to));
         const sec = sleepHeading(pyStr(pyOr(e.section, "")));
-        if (to === undefined || to === slot || ((slot === 0 || to === 0) && sec.toLowerCase() === me.toLowerCase())) {
+        if (to === undefined || to === slot || ((slot === 0 || to === 0) && selfish(sec))) {
           why = "move needs another file, and the self section stays";
         } else {
           const [body, text] = sleepDropSection(next[slot].body, sec);
           if (text === undefined) {
             why = "no such section";
+          } else if (sectionMap(next[to].body).has(sec)) {
+            why = "move needs a section the file does not hold";
           } else {
             next[slot].body = body;
             next[to].body = sleepSetSection(next[to].body, sec, text);
@@ -1846,9 +1888,9 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
       const t = sectionMap(next[k].body).get(h);
       if (!t || (k === 0 && h === me)) continue;
       const where = sleepWhere(next, k);
-      const numbered = t.split("\n").filter((ln) => pyStrip(ln)).map((ln, i) => `${i + 1}: ${ln}`).join("\n");
+      const numbered = t.split("\n").filter((ln) => pyStrip(ln)).map((ln, i) => `${i + 1}: ${sleepKept(ln)}`).join("\n");
       const tg = (await sleepAskJson(run.merge, pyFormat(SLEEP_TIDY, { being, where }),
-        `<section heading="${h}">\n${numbered}\n</section>`, `tidy ${k}:${h}`, log)) ?? {};
+        `<section heading="${sleepNamed(h)}">\n${numbered}\n</section>`, `tidy ${k}:${h}`, log)) ?? {};
       const text = sleepDoubtLinesOut(t, tg.drop, count);
       if (text) {
         tidied.push({ file: k, section: h, before: count(t), after: count(text), before_text: t, after_text: text });
@@ -1866,7 +1908,7 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
           .filter((x) => x).join(", ");
         const where = sleepWhere(next, k);
         const fg = (await sleepAskJson(run.merge, pyFormat(SLEEP_FOLD_SECTION, { being, where, why, lines: limit }),
-          `<section heading="${h}">\n${t}\n</section>`, `fold ${k}:${h}`, log)) ?? {};
+          `<section heading="${sleepNamed(h)}">\n${sleepKept(t)}\n</section>`, `fold ${k}:${h}`, log)) ?? {};
         const text = sleepAsLines(pyStr(pyOr(fg.text, "")));
         const okLines = text.split("\n").filter((ln) => pyStrip(ln));
         if (okLines.length && okLines.length <= limit && count(text) < count(t)) {
@@ -2044,5 +2086,6 @@ export function sleepEstimateSetup(host: SleepHost, opts: SleepEstimateOptions):
 export const SLEEP_PYTHON = {
   pyStrip, pyStr, pyInt, pyFormat, pyJsonIndent0, pyRound6, cpCompare, sleepWhen, sleepEids, sleepSections, sleepJoin,
   sleepAsLines, sleepSetSection, sleepDoubtLinesOut, sleepCheckedItems, sleepParseJson, sleepBoxPick, sleepRender, sleepParts,
-  sleepNotesOf, sleepReadable, sleepNotesFit, sleepLines, sleepSpeaksOf,
+  sleepNotesOf, sleepReadable, sleepNotesFit, sleepLines, sleepSpeaksOf, sleepAge, sleepKept, sleepNamed, sleepWho, sleepCore,
+  sleepBoxText, sleepBoxIndex,
 };

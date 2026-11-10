@@ -32,18 +32,18 @@ const ctx = await mem.recall("what does alice drink?", "alice");
 | Method | What it does |
 |---|---|
 | **Write** | |
-| `add(content, userId?, metadata?, opts?)` | Store one memory. Alias `store`. `opts.image` attaches a photo. |
+| `add(content, userId?, metadata?, opts?)` | Store one memory. Alias `store`. `opts.image` attaches a photo, and `opts.createdAt` says when it was said (from Scroll 2 on). |
 | `addTurn(userMsg, assistantMsg, userId?, opts?)` | Store one exchange of a conversation. `opts.createdAt`, `opts.userSpeaker` and `opts.assistantSpeaker` say when and who. `createdAt` is a `Date` or an RFC 3339 time with `Z` or a `±hh:mm` offset (`2026-05-02T09:00:00Z`); a date alone or a time with no offset is refused. |
 | `addBulk(content, userId?, category?, timestamp?)` | Backfill a long history in one call. |
 | `update(oldMemoryId, newContent, userId?)` | Replace a fact that changed. The old version stays in its history. |
 | **Read** | |
 | `recall(query, userId?, opts?)` | The recent turns, the memories that match and the conversation around the best one, in one call. |
-| `search(query, userId?, limit?, opts?)` | The memories that match, best first. |
+| `search(query, userId?, limit?, opts?)` | The memories that match, best first. `limit` caps these; the assistant's own words and image memories, when there are any, follow them (with `filters`, the assistant's words are left out). |
 | `searchFull(...)` | The same search with each part kept apart, `images` and `verify_used` included. |
 | `searchSelf(...)` | The assistant's own words, kept apart from what others said. |
 | `history(userId?)` | The recent conversation. |
 | `memoryTools(userId, { preset: "S-2", seen: true })` | Adds `memory_recent` and `memory_seen` to the memory tools: the recent conversation, newest first, and the memories held for one of its lines as they stand now. Off by default; `memory_recent` takes each reply's count from `history`, and `memory_seen` asks `seen` once. |
-| `get(userId, memoryId)` | One memory by id. |
+| `get(userId, memoryId)` | One memory by id and its metadata. |
 | `listMemories` · `iterMemories` · `exportMemories` | Every memory in a store: a page at a time, as a stream, or all at once. |
 | `lineage(userId, memoryId)` | The edits that followed one memory. |
 | `revisions(userId?, opts?)` | How many of a store's memories were edited, and which. |
@@ -97,6 +97,9 @@ const system = [
   "What you remember about this user, most relevant first:",
   ...ctx.long_term.memories.map((m) => `- ${m.content}`),
   "",
+  "From the last three days:",
+  ...(ctx.rooms?.memories ?? []).map((m) => `- ${m.content}`),
+  "",
   "Around the most relevant memory:",
   ...ctx.context.around_top_memory,
   "",
@@ -109,7 +112,8 @@ await mem.addTurn(userMessage, reply, "alice");
 ```
 
 Each row of `around_top_memory` starts with `[before] `, `[match] ` or `[after] `: where it
-sits next to the best memory. Keep every list in the order it arrives.
+sits next to the best memory. Keep every list in the order it arrives. From Scroll 2 on, the rooms' memories, from the last three days, come in
+`rooms`; on a model before it that list is empty.
 
 ## Who said it (speakers)
 
@@ -348,7 +352,7 @@ data to fix it.
 ## Changelog
 
 The three clients release in lockstep — same version, same surface, same day. Patch
-releases are additive. Thirteen inside 2.2 were not, deliberately and each with its
+releases are additive. Fourteen inside 2.2 were not, deliberately and each with its
 reason; the changelog lists them.
 
 See [CHANGELOG.md](https://github.com/wontopos/wontopos-node/blob/main/CHANGELOG.md).

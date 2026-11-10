@@ -678,6 +678,12 @@ export interface WriteOptions {
   windowRole?: string;
 }
 
+/** Options of `add`. */
+export interface AddOptions extends WriteOptions {
+  /** When it was said: a `Date`, or RFC 3339 with an offset (from Scroll 2 on). */
+  createdAt?: string | Date;
+}
+
 /** Options of `addTurn`. */
 export interface AddTurnOptions extends WriteOptions {
   /** When the exchange happened: a `Date`, or RFC 3339 with an offset. */
@@ -695,7 +701,7 @@ export interface BulkSegment {
 
 /** Options of `addBulk`. */
 export interface BulkOptions extends WriteOptions {
-  /** A conversation in parts, in place of `content`. */
+  /** A conversation in parts, in place of `content` (from Scroll 2 on; a model before it refuses them). */
   segments?: BulkSegment[];
   speaker?: string;
 }

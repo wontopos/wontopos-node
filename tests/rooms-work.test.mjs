@@ -1786,7 +1786,7 @@ test("an option of null is left out, as Python leaves out None", async () => {
       { user_id: "u" },
       { name: "e", user_id: "u", query: "q" },
       { user_id: "u" },
-      { user_id: "u", question: "q", filters: { source_types: ["user_said", "ai_thought", "inferred", "system"] }, diversity: "full" },
+      { user_id: "u", question: "q", own_words: false, diversity: "full" },
     ]);
   });
 });

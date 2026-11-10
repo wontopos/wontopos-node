@@ -17,7 +17,7 @@ const RESULTS = [
 ];
 const PLAIN = '{"user_id":"u","question":"what did we plan"}';
 const LATER = ['{"user_id":"u","work_id":"w-1"}', '{"user_id":"u","work_id":"w-1","query":"the cake"}'];
-const OTHERS = ',"filters":{"source_types":["user_said","ai_thought","inferred","system"]}';
+const OTHERS = ',"own_words":false';
 const LIVE = `${OTHERS},"diversity":"full"`;
 
 const history = (...lines) => {
@@ -134,7 +134,8 @@ test("the filter and diversity go on the open and later looks send nothing new",
     assert.deepEqual(await turn(client(base).memoryTools("u")), RESULTS);
     assert.deepEqual(seen.map((s) => s.path), [HISTORY, `${WORK}open`, `${WORK}deeper`, `${WORK}search`]);
     const opened = JSON.parse(seen[1].body);
-    assert.deepEqual(opened.filters, { source_types: ["user_said", "ai_thought", "inferred", "system"] });
+    assert.equal(opened.own_words, false);
+    assert.equal("filters" in opened, false);
     assert.equal(opened.diversity, "full");
     assert.equal(seen[1].body, asked(`we booked the cabin\n${Q}`));
     assert.deepEqual(seen.slice(2).map((s) => s.body), LATER);

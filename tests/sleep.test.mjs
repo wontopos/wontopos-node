@@ -484,7 +484,7 @@ test("sleep: the texts the model reads are the Python sleep's bytes", () => {
   for (const [name, want] of Object.entries(PROMPT_DIGESTS)) assert.equal(sha256(sleep[name]), want, name);
   assert.equal(sha256(pyDumps(sleep.SLEEP_OPEN_BOX)), OPEN_BOX_DIGEST, "open_box");
   assert.equal(sleep.SLEEP_NOT_JSON, "\n\nYour last answer was not valid JSON. Answer with the JSON object only.");
-  assert.equal(SLEEP_VERSION, "1.0.1");
+  assert.equal(SLEEP_VERSION, "1.0.2");
   assert.equal(sleep.SLEEP_VERSION, SLEEP_VERSION);
 });
 
@@ -575,6 +575,17 @@ test("sleep: what Python decides about text, numbers and JSON, the TypeScript sl
   const view = PY.render[0];
   for (const [w, want] of PY.pick) assert.equal(p.sleepBoxPick(view, w) ?? null, want, `pick ${JSON.stringify(w)}`);
   assert.equal(p.sleepRender(view, sleep.sleepDate("2026-10-05")), PY.render[1]);
+  const today = sleep.sleepDate("2026-10-05");
+  for (const [d, want] of PY.age) assert.equal(p.sleepAge(d, today), want, `age of ${JSON.stringify(d)}`);
+  for (const [t, want] of PY.kept) assert.equal(p.sleepKept(t), want, `kept ${JSON.stringify(t)}`);
+  for (const [t, want] of PY.named) assert.equal(p.sleepNamed(t), want, `named ${JSON.stringify(t)}`);
+  for (const [sp, being, want] of PY.who) assert.equal(p.sleepWho(sp, being), want, `who ${JSON.stringify([sp, being])}`);
+  for (const [t, want] of PY.core) assert.equal(p.sleepCore(t), want, `core ${JSON.stringify(t)}`);
+  for (const [more, render, index, boxes] of PY.render_more) {
+    assert.equal(p.sleepRender(more, today), render);
+    assert.equal(p.sleepBoxIndex(more, today), index);
+    assert.deepEqual([1, 2, 3, 4].map((k) => p.sleepBoxText(k, more[k], today)), boxes);
+  }
   for (const [tokens, ts, limit, want] of PY.parts) {
     const lines = tokens.map((n, i) => ({ eid: `e${i + 1}`, tokens: n, ts: ts[i] }));
     assert.deepEqual(p.sleepParts(lines, limit).map((part) => part.map((m) => m.eid)), want, `parts of ${JSON.stringify(ts)}`);
@@ -711,7 +722,7 @@ test("sleep: one night asks the service in this order", async (t) => {
   assert.equal(res.done.changed, true);
   assert.deepEqual([res.sleep_id, res.memories, res.today], ["s-1", 20, "2026-09-15 23:00"]);
   assert.equal(res.llm_in, res.log.filter((x) => "in" in x).reduce((n, x) => n + x.in, 0));
-  assert.deepEqual([res.sleep_version, SLEEP_VERSION], ["1.0.1", "1.0.1"]);
+  assert.deepEqual([res.sleep_version, SLEEP_VERSION], ["1.0.2", "1.0.2"]);
   assert.ok(res.llm_out > 0);
 });
 
@@ -1123,7 +1134,7 @@ test("sleep: a line with no speaker in a night of two people is a person's, mark
   assert.deepEqual(who, ["Dana", "user", "Mina", "Kai", "Kai"]);
 });
 
-const BASIS = { sleep_version: "1.0.1", model: "claude-sonnet-5-5", effort: "high", prompt_caching: false, margin: 0.15 };
+const BASIS = { sleep_version: "1.0.2", model: "claude-sonnet-5-5", effort: "high", prompt_caching: false, margin: 0.15 };
 const PY_ESTIMATES = {
   priced: { sleep_id: "s-1", memories: 20, tokens: 460, parts: 1, readers: 1, input_tokens: 2219, output_tokens: 33, cost: 0.002742, basis: { ...BASIS, prices: [1, 5] }, sleepy: false },
   none: { sleep_id: "s-2", memories: 0, tokens: 0, parts: 0, readers: 0, input_tokens: 0, output_tokens: 0, cost: 0, basis: { ...BASIS, prices: [2, 10] }, sleepy: false },
@@ -1411,7 +1422,7 @@ test("sleep: sleep.js ships beside both builds, with only its public names in th
   }
   const dts = read("../dist/sleep.d.ts");
   assert.equal(read("../dist/cjs/sleep.d.ts"), dts, "the CJS types carry the same declarations");
-  assert.match(dts, /export declare const SLEEP_VERSION = "1\.0\.1";/);
+  assert.match(dts, /export declare const SLEEP_VERSION = "1\.0\.2";/);
   assert.match(dts, /export declare class SleepSettings/);
   assert.match(dts, /export interface SleepSettingsOptions/);
   for (const internal of ["sleepFlow", "SLEEP_DIGEST", "SleepHost", "sleepTokens", "SLEEP_PYTHON"]) {

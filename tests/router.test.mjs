@@ -949,7 +949,8 @@ test("an engine without the router channel (404 or 501): ask still returns its r
       const r = await wos.ask("Weather tomorrow?");
       assert.equal(r.ok, true, r.detail);
       assert.equal(r.text, "Sunny.");
-      assert.deepEqual(r.history, { read: "failed", pushed: "failed" });
+      assert.deepEqual(r.history, { read: "skipped", pushed: "skipped" });
+      assert.equal(engine.seen.filter((s) => s.path.endsWith("/channel/push")).length, 0, "no push follows a read that found no channel");
       assert.deepEqual(await wos.routerHistory(), []);
       assert.deepEqual(await wos.routerHistory("u", { speaker: "Ana" }), []);
     } finally {

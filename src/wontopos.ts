@@ -11,7 +11,7 @@ import {
   BASE_URL_ENDS, BRIEF_BODY_MS, BROWSER_REFUSAL, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSPORTS, IDEMPOTENT_METHODS,
   MAX_RESPONSE_BYTES, MAX_RETRY_WAIT_MS, NO_BODY_STATUS, READ_POSTS, RETRY_ALWAYS, RETRY_IF_IDEMPOTENT, STORE_PATHS,
   STORE_TIMEOUT_MS, SlowBody, asPageRelative, causeCode, cleanDetails, cleanServerText, defaultTransport, discard,
-  finiteNumbers, inBrowserPage, instantMs, isConnectFailure, isServiceHost, keptIn, maskBase, maskKey,
+  dayMinute, finiteNumbers, inBrowserPage, instantMs, isConnectFailure, isServiceHost, keptIn, maskBase, maskKey,
   maskUserinfo, notAUrl, pageHref, parseBase, parseErrorText, parseRateLimit, plainHttpOnce, retryAfterMs, shownBase,
   shownSpeaker, timing, tryUrl, warnIfRetiring, warnedRetirements, weekUsedOf,
 } from "./http.js";
@@ -20,7 +20,7 @@ import {
   withRecords,
 } from "./memory.js";
 import {
-  MEMORY_TOOLS_PRESETS, MEMORY_TOOL_NAMES, NOT_ASSISTANT_SOURCES, PHOTO_TYPES, RUN_TAPS, SEEN_STATES, SEEN_TEXT, USAGE_TEXT,
+  MEMORY_TOOLS_PRESETS, MEMORY_TOOL_NAMES, PHOTO_TYPES, RUN_TAPS, SEEN_STATES, SEEN_TEXT, USAGE_TEXT,
   base64, budgetLine, checkDiversity, checkOwnWords, liveQuestion, memoryNote, memoryToolsPreset, namedPreset, pad2, roomsFrom,
   tappedClient, usageLine, usageText, utcLabel,
 } from "./memory-tools.js";
@@ -34,7 +34,7 @@ import {
   SLEEP_EVIDENCE_CHARS_MAX, SLEEP_EVIDENCE_MAX, bulkSegments, checkAssistant, checkContextLimit, checkCount, checkFilters,
   checkId, checkMs, filledText, checkName, checkOpts, checkRange, checkRetries, checkRooms, checkSearchOpts, checkTime,
   checkWindowRole, checkWrittenSpeaker, givenOpts, newIdempotencyKey, normalizeImage, normalizeStoreId, optBool, optRange,
-  pageFields, refuseWindow, requiredId, roomArg, tzMinutes, warnOnUnknownMetadata, warnedFilterKeys,
+  pageFields, refuseTurnSides, refuseWindow, requiredId, roomArg, tzMinutes, warnOnUnknownMetadata, warnedFilterKeys,
   writeKey, IDEMPOTENCY_KEY_RE, MODEL_RE, assertUsableStoreId, checkMetadataKeys, namedStore, sleepNotesBody, sleepOpenBody,
   sleepSlot, sleepWrites, warnIfStoreIdCollapses, warnedStoreIds,
 } from "./checks.js";
@@ -53,7 +53,7 @@ import {
 } from "./router.js";
 import type { AskOutcome, Failure, RouterClock } from "./router.js";
 import type {
-  AddTurnOptions, AroundResult, AskHistory, AskReadiness, AskResult, AskUsage, BulkOptions, ClearWindowResult,
+  AddOptions, AddTurnOptions, AroundResult, AskHistory, AskReadiness, AskResult, AskUsage, BulkOptions, ClearWindowResult,
   EngramCatalog, EngramInfo, EngramResult, ForgetSpeakerResult, HistoryTurn, ImageBytes, ImageDeleteResult, ImagePage,
   LineageResult, Memory, MemoryPage, ModelInfo, RateLimit, RecallResult, RelabelResult, RetrievalsPage, RevisionsResult,
   RouterExchange, SearchFilters, SearchOptions, SearchResult, SeenResult, SelfSearchResult, SkillDefinition,
@@ -63,7 +63,7 @@ import type {
   WorkAroundResult, WorkCloseResult, WorkResult, WorkState, WriteOptions,
 } from "./types.js";
 export type {
-  AddTurnOptions, AroundPiece, AroundResult, AskHistory, AskReadiness, AskReason, AskResult, AskUsage, BulkOptions,
+  AddOptions, AddTurnOptions, AroundPiece, AroundResult, AskHistory, AskReadiness, AskReason, AskResult, AskUsage, BulkOptions,
   BulkSegment, ClearWindowResult, Clock, DefaultSpeakers, EngramCatalog, EngramInfo, EngramResult, ForgetSpeakerResult,
   HistoryTurn, ImageBytes, ImageDeleteResult, ImageInput, ImagePage, LineageResult, LineageStep, Memory, MemoryPage,
   ModelCapabilities, ModelInfo, NumberedMemory, RateLimit, RecallResult, RecallRoom, RelabelResult, Repeated,
@@ -75,7 +75,7 @@ export type {
   WorkCloseResult, WorkResult, WorkRoom, WorkState, WriteOptions,
 } from "./types.js";
 
-const VERSION = "2.2.50";
+const VERSION = "2.2.51";
 const RUNTIME = (() => {
   const p = (globalThis as any)?.process;
   return p?.version ? ` (node/${p.version}; ${p.platform}-${p.arch})` : "";
@@ -518,6 +518,8 @@ export class Client {
   private readonly signal?: AbortSignalLike;
   private readonly fetchImpl: (url: string, init: FetchInitLike) => Promise<Response>;
   private readonly userinfo: boolean;
+  private readonly wire: string;
+  private readonly basicAuth?: string;
   private readonly pageRelative: boolean;
   private readonly customFetch: boolean;
   private readonly allowBrowser: boolean;
@@ -578,6 +580,21 @@ export class Client {
     if (!parsed || (tryUrl(this.base) && !/^[^:]*:\/\/[^/]/.test(this.base))) throw new Error(notAUrl(trimmed));
     this.pageRelative = !url;
     this.userinfo = Boolean(parsed.username || parsed.password);
+    this.wire = this.base;
+    if (this.userinfo && url) {
+      const plain = (s: string): string => {
+        try {
+          return decodeURIComponent(s);
+        } catch {
+          return s;
+        }
+      };
+      const bare = new URL(url.href);
+      bare.username = "";
+      bare.password = "";
+      this.wire = bare.href.replace(/\/+$/, "");
+      this.basicAuth = `Basic ${base64(new TextEncoder().encode(`${plain(url.username)}:${plain(url.password)}`))}`;
+    }
     this.allowBrowser = optBool(opts.dangerouslyAllowBrowser, "dangerouslyAllowBrowser") === true;
     if (!this.allowBrowser && inBrowserPage() && isServiceHost(hostKey(parsed.hostname))) {
       throw new Error(BROWSER_REFUSAL);
@@ -619,6 +636,7 @@ export class Client {
       "User-Agent": USER_AGENT,
     };
     if (this.model) this.headers["X-WOS-Model"] = this.model;
+    if (this.basicAuth) this.headers.Authorization = this.basicAuth;
     if (plainHttpOnce(`baseUrl\u0000${this.base}`, url)) {
       console.warn(
         "wontopos: baseUrl uses plain HTTP on a non-local host, so the API key travels unencrypted. Use https://."
@@ -751,10 +769,13 @@ export class Client {
   }
 
   /** Store one memory. */
-  async add(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
+  async add(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: AddOptions = {}): Promise<StoreResult> {
     metadata ??= {};
     checkMetadataKeys(metadata);
+    refuseTurnSides(opts, metadata);
     if (typeof metadata.speaker === "string") metadata = { ...metadata, speaker: checkWrittenSpeaker(metadata.speaker, "speaker") };
+    if (opts.createdAt != null) metadata = { ...metadata, created_at: checkTime(opts.createdAt, "createdAt") };
+    else if (metadata.created_at != null) metadata = { ...metadata, created_at: checkTime(metadata.created_at, "created_at") };
     const body = this.writeExtras({ user_id: this.uid(userId), content, metadata }, opts);
     optBool(opts.window, "window");
     if (opts.windowRole != null && opts.window !== true) {
@@ -769,7 +790,7 @@ export class Client {
     return this.write("/api/v1/memory/store", body, writeKey(opts, "add"));
   }
   /** Alias of `add`. */
-  async store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: WriteOptions = {}): Promise<StoreResult> {
+  async store(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: AddOptions = {}): Promise<StoreResult> {
     return this.add(content, userId, metadata, opts);
   }
   /** Store a conversation turn: the person's message and the assistant's reply. */
@@ -880,16 +901,16 @@ export class Client {
       todayStart?: string;
       /** Answer as of this time (RFC3339). */
       now?: string;
-      /** Lines of the recent conversation, 0-500. */
+      /** Lines of the recent conversation, 0-500 (from Scroll 2 on; Tablet 2 ignores it). */
       shortTermLimit?: number;
-      /** Tokens of those lines, 0-8000; 0 sets no limit. */
+      /** Tokens of those lines, 0-8000; 0 sets no limit (from Scroll 2 on; Tablet 2 ignores it). */
       shortTermBudgetTokens?: number;
-      /** Image memories, 0-5. */
+      /** Image memories, 0-5 (from Scroll 2 on; Tablet 2 ignores it). */
       maxImages?: number;
       filters?: SearchFilters;
       /** Only this person's words. */
       speaker?: string;
-      /** Also recall memories a later one replaced. */
+      /** Also recall memories a later one replaced (from Scroll 2 on; Tablet 2 ignores it). */
       includeSuperseded?: boolean;
     } = {},
   ): Promise<RecallResult> {
@@ -1265,7 +1286,7 @@ export class Client {
     return this.untilComplete("/api/v1/memory/speakers/relabel", body);
   }
 
-  /** Delete everything a person said in this store. */
+  /** Delete everything a person said in this store (from Tablet 2 on). */
   async forgetSpeaker(
     speaker: string | string[],
     userId: string,
@@ -1305,7 +1326,7 @@ export class Client {
     const body = this.look({ user_id: this.uid(userId), question: checkId(question, "question") }, opts);
     const maxImages = optRange(opts.maxImages, "maxImages", 0, MAX_IMAGES_MAX);
     if (maxImages !== undefined) body.max_images = maxImages;
-    if (checkOwnWords(opts.ownWords) === false) body.filters = { source_types: [...NOT_ASSISTANT_SOURCES] };
+    if (checkOwnWords(opts.ownWords) === false) body.own_words = false;
     const diversity = checkDiversity(opts.diversity);
     if (diversity !== undefined) body.diversity = diversity;
     return this.work("open", body);
@@ -1702,18 +1723,20 @@ export class Client {
     const pre = await this.askPrecheck(store);
     if (pre) return refuse(pre);
     const clock = this.routerClock() as RouterClock;
-    const t0 = Date.now();
-    const lim = st.reserve(normalizeStoreId(store), turn, clockParts(clock, t0).date, t0);
+    const t0 = timing.now();
+    const lim = st.reserve(normalizeStoreId(store), turn, clockParts(clock, Date.now()).date, t0);
     if ("full" in lim) return refuse({ reason: "limit", detail: lim.full });
     const run = new AskClock(lim.budgetMs, [this.signal, opts.signal]);
     try {
       let exchanges: RouterExchange[] = [];
+      let noChannel = false;
       if (useHistory) {
         try {
           exchanges = await this.channelRead(store, speaker, run);
           history.read = "ok";
-        } catch {
-          history.read = "failed";
+        } catch (e) {
+          noChannel = e instanceof WosError && (e.status === 404 || e.status === 501);
+          history.read = noChannel ? "skipped" : "failed";
         }
       }
       if (run.why()) return refuse(run.failure());
@@ -1730,7 +1753,7 @@ export class Client {
         result = "reason" in ran ? refuse(ran, at) : end({ ok: true, ...at, ...ran });
       }
       if (useHistory) {
-        if (run.why() || run.left() <= 0) history.pushed = "skipped";
+        if (noChannel || run.why() || run.left() <= 0) history.pushed = "skipped";
         else {
           try {
             await this.channelPush(store, speaker, request, exchangeAnswer(result), run);
@@ -1743,7 +1766,7 @@ export class Client {
       return result;
     } finally {
       run.close();
-      lim.done(Date.now() - t0);
+      lim.done(timing.now() - t0);
     }
   }
 
@@ -2152,7 +2175,7 @@ export class Client {
       let res: Response;
       const transport = this.fetchImpl;
       try {
-        res = await transport(`${this.base}${path}`, { method, headers, body: payload, signal: att.signal, redirect: "manual" });
+        res = await transport(`${this.wire}${path}`, { method, headers, body: payload, signal: att.signal, redirect: "manual" });
       } catch (e: any) {
         att.clear();
         const timedOut = e?.name === "AbortError" || att.signal.aborted;
@@ -2715,11 +2738,9 @@ export class MemoryTools<Images extends boolean = false> {
     const shift = own !== undefined ? own * 60_000 : (this.tz ?? 0) * 3_600_000;
     if (at !== undefined) {
       if (ev !== undefined && ev % 86_400_000 === 0) {
-        date = new Date(ev).toISOString().slice(0, 10);
+        date = dayMinute(ev)[0];
       } else {
-        const iso = new Date(at + shift).toISOString();
-        date = iso.slice(0, 10);
-        time = iso.slice(11, 16);
+        [date, time] = dayMinute(at + shift);
         zone = own !== undefined ? (this.tz !== undefined && own === this.tz * 60 ? "" : utcLabel(own))
           : this.tz === undefined ? "UTC" : "";
       }
@@ -2737,7 +2758,7 @@ export class MemoryTools<Images extends boolean = false> {
       again = timed = ` (said at least ${rep?.times} times)`;
       const first = instantMs(rep?.first?.created_at);
       if (first !== undefined) {
-        timed = ` (said at least ${rep?.times} times, first on ${new Date(first + shift).toISOString().slice(0, 10)})`;
+        timed = ` (said at least ${rep?.times} times, first on ${dayMinute(first + shift)[0]})`;
       }
     }
     const content = String(m.content ?? "");

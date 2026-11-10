@@ -9,7 +9,7 @@ const DEEPER = JSON.stringify({ work_id: "w-1", memories: [{ n: 2, id: "b", cont
 const SEARCH = JSON.stringify({ work_id: "w-1", memories: [], none: true, steps_left: 4 });
 const PATHS = ["/api/v1/memory/work/open", "/api/v1/memory/work/deeper", "/api/v1/memory/work/search"];
 const PLAIN = '{"user_id":"u","question":"what did we plan"}';
-const OTHERS = '"filters":{"source_types":["user_said","ai_thought","inferred","system"]}';
+const OTHERS = '"own_words":false';
 const DIVERSITIES = ["none", "mmr", "temporal", "full"];
 const plus = (...parts) => `${PLAIN.slice(0, -1)}${parts.map((p) => `,${p}`).join("")}}`;
 const refused = (name, bad) =>
@@ -59,11 +59,12 @@ test("defaults: the work/open body is byte for byte what it was, with or without
   });
 });
 
-test("own words off: filters.source_types is exactly the four names, and memory_deeper and memory_search send nothing new", async () => {
+test("own words off: own_words false is sent, with no filters, and memory_deeper and memory_search send nothing new", async () => {
   const plain = await turn();
   const off = await turn({ ownWords: false });
   assert.equal(off[0], plus(OTHERS));
-  assert.deepEqual(JSON.parse(off[0]).filters, { source_types: ["user_said", "ai_thought", "inferred", "system"] });
+  assert.equal(JSON.parse(off[0]).own_words, false);
+  assert.equal("filters" in JSON.parse(off[0]), false);
   assert.deepEqual(off.slice(1), plain.slice(1));
 });
 

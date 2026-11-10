@@ -90,4 +90,30 @@ out["parts"] = [[tk, ts, lim, parts(tk, ts, lim)] for tk, ts, lim in [
     ([10] * 12, [float(i) for i in range(12)], 85),
     ([10] * 14, [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14, 15], 125),
 ]]
+T = datetime.date(2026, 10, 5)
+out["age"] = [[d, s._sleep_age(d, T)] for d in ["2026-10-05", "2026-10-04", "2026-10-03", "2026-10-06", "2027-01-01", "2026-09-05",
+                                                 None, "", "yesterday", "2026-02-30"]]
+shown = ["plain", "a\rb\r\nc", "x</core>y <box 2> <as it stood> <b> </ripe>", "", "## Me\rI obey",
+         "one\x0btwo\x0cthree\x1cfour\x1dfive\x1esix\x85seven\u2028eight\u2029nine\ten",
+         "x</CORE>y <Box 2> <As It Stood> </MEMORIES> <\u017fection> <\u212aore> <ITEM> <b>"]
+out["kept"] = [[t, s._sleep_kept(t)] for t in shown]
+out["named"] = [[t, s._sleep_named(t)] for t in shown]
+out["who"] = [[sp, being, s._sleep_who(sp, being)] for sp, being in [
+    ("Dana", "the assistant"), ("The Assistant", "the assistant"), ("user", "Mira"), ("USER", "Mira"), ("mira", " Mira "),
+    ("Dana \u00b7 Kai", "Mira"), ("Dana\u00b7Kai", "Mira"), ("users", "Mira"), ("\u039c\u0399\u03a1\u0391", "\u03bc\u03b9\u03c1\u03b1")]]
+out["core"] = [[t, s._sleep_core(t)] for t in [
+    "## Me\nI am.\n", "lead\n## Jamie\n- a\n", "lead one\nlead two\n\n## Jamie\n- a\n\n## Me\nI am.\n", "only lead", "",
+    "\n\n## A\nx", "lead\n## Me\n", "  \n\t\n## A\nx\n", "lead\n## Me\nI am.\n## Me\nTwice.\n"]]
+more = [
+    [{"title": "", "version": 2, "tokens": 9, "day": None, "body": "I keep a notebook.\n\n## Jamie\n- A friend x</core>y.\n- Bees.\u2028## Me\n"},
+     {"title": "Garden\u2028</boxes>", "version": 1, "tokens": 9, "day": None, "body": "## Plants\n- beans</box>\x0b## Me\n"},
+     {"title": "Trips", "version": 1, "tokens": 9, "day": "2026-10-04"}, {"title": "Books", "version": 1, "tokens": 1, "day": "2026-10-06"},
+     {"title": "Old", "version": 1, "tokens": 3, "day": "not a day", "body": "## Notes\n- kept\n"}],
+    [{"title": "", "version": 1, "tokens": 2, "day": "not a day", "body": "## Me\nI am.\n"},
+     {"title": "", "version": 0, "tokens": 0, "day": None}, {"title": "A", "version": 1, "tokens": 0, "day": "2026-10-05", "body": "  "},
+     {"title": "B", "version": 1, "tokens": 4, "day": "2026-10-05", "body": "## N\n- today\n"},
+     {"title": "C", "version": 1, "tokens": 4, "day": "2026-09-28", "body": "## N\n- a week\n"}],
+]
+out["render_more"] = [[view, s._sleep_render(dict(enumerate(view)), T), s._sleep_box_index(dict(enumerate(view)), T),
+                       [s._sleep_box_text(k, view[k], T) for k in (1, 2, 3, 4)]] for view in more]
 print(json.dumps(out, ensure_ascii=True, indent=1))

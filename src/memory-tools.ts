@@ -121,7 +121,6 @@ function memoryToolsPreset(preset: unknown, model: string): string {
 }
 
 const DIVERSITIES = ["none", "mmr", "temporal", "full"] as const;
-const NOT_ASSISTANT_SOURCES = ["user_said", "ai_thought", "inferred", "system"];
 
 function checkDiversity(diversity: unknown): (typeof DIVERSITIES)[number] | undefined {
   if (diversity === undefined || diversity === null) return undefined;
@@ -193,7 +192,7 @@ function roomsFrom(s: string): string | string[] {
 }
 
 export {
-  MEMORY_TOOLS_PRESETS, MEMORY_TOOL_NAMES, NOT_ASSISTANT_SOURCES, PHOTO_TYPES, RUN_TAPS, SEEN_STATES, SEEN_TEXT, USAGE_TEXT,
+  MEMORY_TOOLS_PRESETS, MEMORY_TOOL_NAMES, PHOTO_TYPES, RUN_TAPS, SEEN_STATES, SEEN_TEXT, USAGE_TEXT,
   base64, budgetLine, checkDiversity, checkOwnWords, liveQuestion, memoryNote, memoryToolsPreset, namedPreset, pad2, roomsFrom,
   tappedClient, usageLine, usageText, utcLabel,
 };

@@ -152,6 +152,18 @@ function checkWindowRole(role: unknown): string {
   return role;
 }
 
+function refuseTurnSides(opts: WriteOptions, metadata: Record<string, unknown>): void {
+  const given: Array<[string, unknown]> = [
+    ["userSpeaker", (opts as Record<string, unknown>).userSpeaker],
+    ["assistantSpeaker", (opts as Record<string, unknown>).assistantSpeaker],
+    ["user_speaker", metadata.user_speaker],
+    ["assistant_speaker", metadata.assistant_speaker],
+  ];
+  for (const [name, v] of given) {
+    if (v != null) throw new Error(`${name} is for addTurn: it names a side of a turn. On add, name who said it in metadata.speaker.`);
+  }
+}
+
 function refuseWindow(opts: WriteOptions, why: string): void {
   if (opts.window !== undefined || opts.windowRole !== undefined) throw new Error(`window is for add: ${why}.`);
 }
@@ -339,8 +351,8 @@ function givenOpts(known: Record<string, unknown>): Record<string, unknown> {
 
 const WRITE_KEYS = {
   add: [
-    new Set(["idempotencyKey", "image", "tz", "workId", "window", "windowRole"]),
-    "add takes idempotencyKey, image, tz, workId, window and windowRole.",
+    new Set(["idempotencyKey", "image", "tz", "workId", "window", "windowRole", "createdAt"]),
+    "add takes idempotencyKey, image, tz, workId, window, windowRole and createdAt.",
   ],
   addTurn: [
     new Set(["idempotencyKey", "tz", "workId", "createdAt", "userSpeaker", "assistantSpeaker"]),
@@ -381,7 +393,7 @@ function checkFilters(filters: unknown): void {
   }
 }
 
-const KNOWN_METADATA_KEYS = new Set(["speaker", "event_date", "category", "conversation_id"]);
+const KNOWN_METADATA_KEYS = new Set(["speaker", "event_date", "category", "conversation_id", "created_at"]);
 const warnedMetadataKeys = new Set<string>();
 
 function warnOnUnknownMetadata(metadata: unknown): void {
@@ -512,7 +524,7 @@ export {
   RELABEL_IDS_MAX, RESEND_MAX, SLEEP_EVIDENCE_CHARS_MAX, SLEEP_EVIDENCE_MAX, assertUsableStoreId, bulkSegments,
   checkAssistant, checkContextLimit, checkCount, checkFilters, checkId, checkMetadataKeys, checkMs, filledText, checkName,
   checkOneLine, checkOpts, checkRange, checkRetries, checkRooms, checkSearchOpts, checkTime, checkWindowRole, checkWrittenSpeaker, editWithin, givenOpts, namedStore, newIdempotencyKey, normalizeImage,
-  normalizeStoreId, optBool, optRange, pageFields, refuseWindow, requiredId, roomArg, sleepNotesBody, sleepOpenBody,
+  normalizeStoreId, optBool, optRange, pageFields, refuseTurnSides, refuseWindow, requiredId, roomArg, sleepNotesBody, sleepOpenBody,
   sleepSlot, sleepWrites, tzMinutes, warnIfStoreIdCollapses, warnOnUnknownMetadata,
   warnedFilterKeys, warnedStoreIds, writeKey,
 };

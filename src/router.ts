@@ -1,5 +1,5 @@
 import { MAX_TIMER_MS, checkOneLine, checkOpts, editWithin, givenOpts, normalizeStoreId } from "./checks.js";
-import { asObj, cleanServerText, instantMs, keptIn } from "./http.js";
+import { asObj, cleanServerText, instantMs, keptIn, timing } from "./http.js";
 import { CONTEXT_WORDS, checkModelKey, providerBase, providerUrl } from "./callers.js";
 import { nestsDeeper, parseFiniteJson } from "./sleep.js";
 import { anthropicCaller } from "./wontopos.js";
@@ -213,7 +213,10 @@ function routerTurn(exchanges: RouterExchange[], clock: RouterClock, now: number
 
 function skillList(skills: SkillDefinition[]): string {
   const lines = [ROUTER_TEXT.skills];
-  for (const s of skills) lines.push(`- ${s.name}: ${keptIn(s.description)}\n  ${ROUTER_TEXT.skillInput} ${JSON.stringify(s.input)}`);
+  for (const s of skills) {
+    const shown = JSON.stringify(s.input).replace(/[\u0085\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    lines.push(`- ${s.name}: ${keptIn(s.description)}\n  ${ROUTER_TEXT.skillInput} ${shown}`);
+  }
   return lines.join("\n");
 }
 
@@ -430,7 +433,7 @@ class AskClock {
   private readonly onCaller = (): void => this.stop("caller");
 
   constructor(budgetMs: number, signals: (AbortSignalLike | undefined)[]) {
-    this.endsAt = Date.now() + budgetMs;
+    this.endsAt = timing.now() + budgetMs;
     this.timer = setTimeout(() => this.stop("deadline"), Math.max(0, Math.min(budgetMs, MAX_TIMER_MS)));
     this.outer = signals.filter((s): s is AbortSignalLike => s !== undefined && s !== null) as unknown as AbortSignalShape[];
     for (const s of this.outer) {
@@ -450,7 +453,7 @@ class AskClock {
   }
 
   left(): number {
-    return this.endsAt - Date.now();
+    return this.endsAt - timing.now();
   }
 
   failure(): Failure {
