@@ -818,7 +818,7 @@ test("export and import: a store's skills as JSON, checked whole before any is a
     assert.equal(parsed.store, "a");
     assert.deepEqual(parsed.skills.map((s) => s.name), ["add_event", "lookup"]);
     assert.deepEqual(await wos.importSkills(text, "d"), ["add_event", "lookup"]);
-    assert.deepEqual(await wos.listSkills("d"), await wos.listSkills("a"));
+    assert.deepEqual(await wos.listSkills("d"), [{ ...EVENT, confirm: true }, WEB], "a code skill comes in with confirm on; an llm skill as it was");
     assert.deepEqual(await wos.importSkills(parsed, "f"), ["add_event", "lookup"], "the parsed object works too");
 
     await assert.rejects(wos.importSkills(text, "d"), /already has a skill named "add_event"; nothing was imported/);
@@ -832,6 +832,9 @@ test("export and import: a store's skills as JSON, checked whole before any is a
 
     const bare = client(engine, {});
     await assert.rejects(bare.importSkills(text, "h"), /router\.handlers\.add_event/);
+    const off = JSON.stringify({ wontopos_skills: 1, skills: [{ ...EVENT, confirm: false }, { ...WEB, confirm: false }] });
+    assert.deepEqual(await wos.importSkills(off, "i"), ["add_event", "lookup"]);
+    assert.deepEqual((await wos.listSkills("i")).map((s) => s.confirm), [true, false], "an import cannot bind your function to a skill that runs without asking");
   } finally {
     engine.close();
   }
@@ -1705,7 +1708,7 @@ test("a skill field set to null is left out, as Python leaves it out", async () 
     const llm = blanked(WEB, ["max_tokens", "effort", "model", "caller", "confirm", "metadata"]);
     const code = blanked(EVENT, ["instructions", "max_tokens", "effort", "model", "caller", "confirm", "metadata"]);
     assert.deepEqual(await wos.importSkills(JSON.stringify({ wontopos_skills: 1, skills: [llm, code] })), ["lookup", "add_event"]);
-    assert.deepEqual(await wos.listSkills(), [EVENT, WEB]);
+    assert.deepEqual(await wos.listSkills(), [{ ...EVENT, confirm: true }, WEB]);
     assert.ok(!(await wos.exportSkills()).includes("null"));
     assert.deepEqual(await wos.addSkill({ ...WEB, name: "other", confirm: null }, "b"), { ...WEB, name: "other" });
     assert.deepEqual(await wos.importSkillMd("c", "---\nname: trip\ndescription: Plans trips.\n---\nPlan it.\n", { model: null, confirm: null }).then((s) => [s.model, s.confirm]), [undefined, undefined]);

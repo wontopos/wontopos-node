@@ -75,7 +75,7 @@ export type {
   WorkCloseResult, WorkResult, WorkRoom, WorkState, WriteOptions,
 } from "./types.js";
 
-const VERSION = "2.2.51";
+const VERSION = "2.2.52";
 const RUNTIME = (() => {
   const p = (globalThis as any)?.process;
   return p?.version ? ` (node/${p.version}; ${p.platform}-${p.arch})` : "";
@@ -844,7 +844,7 @@ export class Client {
     );
   }
 
-  /** Search a store's memories. */
+  /** Search a store's memories; for an LLM's context use `recall`, which also brings the recent turns and, from Scroll 2 on, the last three days. */
   async search(query: string, userId?: string, limit = 10, opts: SearchOptions = {}): Promise<Memory[]> {
     const body = this.searchBody(query, userId, limit, opts);
     const r = await this.post("/api/v1/memory/search", body);
@@ -874,7 +874,7 @@ export class Client {
       images: asRecords<Memory>(r.images),
     };
   }
-  /** One-call context for an LLM: recent turns, long-term memories and the context around them. */
+  /** One-call context for an LLM: recent turns, long-term memories and the context around them, and from Scroll 2 on the last three days by part of the day. */
   async recall(
     query: string,
     userId?: string,
@@ -1634,7 +1634,7 @@ export class Client {
     return JSON.stringify({ wontopos_skills: SKILLS_EXPORT_VERSION, store, skills: this.routerState.skills.list(store) });
   }
 
-  /** Add the skills of an `exportSkills` text to a store, all or none. */
+  /** Add the skills of an `exportSkills` text to a store, all or none. A code skill comes in with `confirm` on. */
   async importSkills(data: string | Record<string, unknown>, userId?: string): Promise<string[]> {
     let parsed: unknown = data;
     if (typeof data === "string") {
@@ -1657,6 +1657,7 @@ export class Client {
         throw new Error(`skills[${i}]: ${e instanceof Error ? e.message : String(e)} Nothing was imported.`);
       }
     });
+    for (const d of defs) if (d.kind === "code") d.confirm = true;
     const names = new Set<string>();
     for (const d of defs) {
       if (names.has(d.name)) throw new Error(`${JSON.stringify(d.name)} is in the skills twice; nothing was imported.`);
