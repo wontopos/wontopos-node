@@ -11,10 +11,15 @@ function normalizeStoreId(id: string): string {
 }
 const WARNED_FILTER_KEYS_MAX = 1024;
 
+/** A value as an error message shows it: a string in quotes, so "5" does not read as 5. */
+function shown(v: unknown): string {
+  return typeof v === "string" ? JSON.stringify(v) : String(v);
+}
+
 function checkCount(limit: number, name: string): void {
   if (!Number.isInteger(limit) || limit < SEARCH_LIMIT_MIN || limit > SEARCH_LIMIT_MAX) {
     throw new Error(
-      `${name} must be an integer between ${SEARCH_LIMIT_MIN} and ${SEARCH_LIMIT_MAX}, got ${limit}. ` +
+      `${name} must be an integer between ${SEARCH_LIMIT_MIN} and ${SEARCH_LIMIT_MAX}, got ${shown(limit)}. ` +
         `Out of range is refused rather than adjusted, so a short answer always means ` +
         `the store was short.`
     );
@@ -23,7 +28,7 @@ function checkCount(limit: number, name: string): void {
 
 function checkContextLimit(n: number): void {
   if (!Number.isInteger(n) || n < CONTEXT_LIMIT_MIN || n > CONTEXT_LIMIT_MAX) {
-    throw new Error(`context_limit must be an integer between ${CONTEXT_LIMIT_MIN} and ${CONTEXT_LIMIT_MAX}, got ${n}.`);
+    throw new Error(`context_limit must be an integer between ${CONTEXT_LIMIT_MIN} and ${CONTEXT_LIMIT_MAX}, got ${shown(n)}.`);
   }
 }
 
@@ -46,7 +51,7 @@ const RESEND_MAX = 3;
 
 function checkRange(n: unknown, name: string, min: number, max: number): void {
   if (typeof n !== "number" || !Number.isInteger(n) || n < min || n > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max}, got ${String(n)}.`);
+    throw new Error(`${name} must be an integer between ${min} and ${max}, got ${shown(n)}.`);
   }
 }
 
@@ -139,7 +144,8 @@ function checkTime(v: unknown, name: string): string {
   if (!ok) {
     throw new Error(
       `${name} must be a Date or an RFC 3339 time with Z or a ±hh:mm offset, such as 2026-05-02T09:00:00Z ` +
-        `(a date alone or a time with no offset is refused), got ${JSON.stringify(v)}.`,
+        `(a date alone, a time with no offset, and a space or a small t in place of the T are refused), ` +
+        `got ${JSON.stringify(v)}.`,
     );
   }
   return s;
@@ -516,6 +522,7 @@ function sleepNotesBody(store: string, baseVersion: unknown, notes: unknown): Re
 }
 
 export {
+  shown,
   KNOWN_AROUND_KEYS, KNOWN_CLEAR_WINDOW_KEYS, KNOWN_ENGRAM_KEYS, KNOWN_FORGET_IMAGE_KEYS, KNOWN_FORGET_SPEAKER_KEYS,
   KNOWN_LIST_MEMORIES_KEYS, KNOWN_LOOK_KEYS, KNOWN_MEMORY_TOOLS_KEYS, KNOWN_OPEN_WORK_KEYS, KNOWN_PAGE_KEYS,
   KNOWN_PAGE_SIZE_KEYS, KNOWN_RECALL_KEYS, KNOWN_RELABEL_KEYS, KNOWN_RETRIEVALS_KEYS, KNOWN_REVISIONS_KEYS,

@@ -36,7 +36,7 @@ import {
   checkWindowRole, checkWrittenSpeaker, givenOpts, newIdempotencyKey, normalizeImage, normalizeStoreId, optBool, optRange,
   pageFields, refuseTurnSides, refuseWindow, requiredId, roomArg, tzMinutes, warnOnUnknownMetadata, warnedFilterKeys,
   writeKey, IDEMPOTENCY_KEY_RE, MODEL_RE, assertUsableStoreId, checkMetadataKeys, namedStore, sleepNotesBody, sleepOpenBody,
-  sleepSlot, sleepWrites, warnIfStoreIdCollapses, warnedStoreIds,
+  shown, sleepSlot, sleepWrites, warnIfStoreIdCollapses, warnedStoreIds,
 } from "./checks.js";
 import {
   FORMAT_REFUSED, KNOWN_ANTHROPIC_CALLER_KEYS, KNOWN_OPENAI_CALLER_KEYS, MODEL_KEY_BROWSER_REFUSAL, anthropicBody, anthropicReply, checkModelKey, hostKey, openaiBody,
@@ -75,7 +75,8 @@ export type {
   WorkCloseResult, WorkResult, WorkRoom, WorkState, WriteOptions,
 } from "./types.js";
 
-const VERSION = "2.2.52";
+const VERSION = "2.2.53";
+const CAME_FROM_A_LOOK = "memoryId is required (non-blank) — the id a search, recall or work returned.";
 const RUNTIME = (() => {
   const p = (globalThis as any)?.process;
   return p?.version ? ` (node/${p.version}; ${p.platform}-${p.arch})` : "";
@@ -771,6 +772,9 @@ export class Client {
   /** Store one memory. */
   async add(content: string, userId?: string, metadata: Record<string, unknown> = {}, opts: AddOptions = {}): Promise<StoreResult> {
     metadata ??= {};
+    if (!isPlainObject(metadata)) {
+      throw new Error(`metadata must be an object, got ${Array.isArray(metadata) ? "an array" : typeof metadata}. Nothing was sent.`);
+    }
     checkMetadataKeys(metadata);
     refuseTurnSides(opts, metadata);
     if (typeof metadata.speaker === "string") metadata = { ...metadata, speaker: checkWrittenSpeaker(metadata.speaker, "speaker") };
@@ -959,7 +963,7 @@ export class Client {
     opts: { from?: number; to?: number; center?: number; held?: [number, number] } = {},
   ): Promise<AroundResult> {
     checkOpts(opts, KNOWN_AROUND_KEYS, "around");
-    const body: Record<string, unknown> = { user_id: this.uid(userId), memory_id: checkId(memoryId, "memoryId") };
+    const body: Record<string, unknown> = { user_id: this.uid(userId), memory_id: requiredId(memoryId, CAME_FROM_A_LOOK) };
     putOffsets(body, opts);
     if (opts.held != null) {
       if (!Array.isArray(opts.held) || opts.held.length !== 2) throw new Error("held must be [first, last].");
@@ -971,7 +975,7 @@ export class Client {
 
   /** How a memory was reached, when it answered a work of three steps or more. */
   async why(memoryId: string, userId?: string): Promise<WhyResult> {
-    return this.post("/api/v1/memory/why", { user_id: this.uid(userId), memory_id: checkId(memoryId, "memoryId") });
+    return this.post("/api/v1/memory/why", { user_id: this.uid(userId), memory_id: requiredId(memoryId, CAME_FROM_A_LOOK) });
   }
 
   /** What this store handed out, newest first. */
@@ -1015,13 +1019,13 @@ export class Client {
   /** What this key has spent, and what is left. */
   async usage(days = 7): Promise<UsageResult> {
     if (!Number.isInteger(days) || days < 1 || days > 365) {
-      throw new Error(`days must be an integer between 1 and 365, got ${days}.`);
+      throw new Error(`days must be an integer between 1 and 365, got ${shown(days)}.`);
     }
     return this.request("GET", `/api/v1/won/usage?days=${days}`);
   }
   /** Fetch one memory by id. An unknown id rejects with `NotFoundError`. */
   async get(userId: string | undefined, memoryId: string): Promise<Memory> {
-    const id = requiredId(memoryId, "memoryId is required — the id that add/store or listMemories returned.");
+    const id = requiredId(memoryId, "memoryId is required — the id that add/store or listMemories returned. Note the argument order: get(userId, memoryId). With a store set on the client, call get(undefined, memoryId).");
     return this.post("/api/v1/memory/get", { user_id: this.uid(userId), memory_id: id }).then(memoryFromGet);
   }
   /** One page of a store's memories. Pass `next_cursor` back as `cursor` for the next page. */
@@ -1075,7 +1079,7 @@ export class Client {
 
   /** The edits that followed one memory, oldest first. */
   async lineage(userId: string | undefined, memoryId: string): Promise<LineageResult> {
-    const id = requiredId(memoryId, "memoryId is required — the memory whose history you want.");
+    const id = requiredId(memoryId, "memoryId is required (non-blank) — the id that add/store or listMemories returned.");
     return withRecords(await this.post("/api/v1/memory/lineage", { user_id: this.uid(userId), memory_id: id }), "chain");
   }
 
@@ -1139,7 +1143,7 @@ export class Client {
 
   /** Delete one memory by id. */
   async delete(userId: string | undefined, memoryId: string): Promise<StatusResult> {
-    const id = requiredId(memoryId, "memoryId is required (non-blank). To delete every memory in a store, call deleteAll(userId) explicitly.");
+    const id = requiredId(memoryId, "memoryId is required (non-blank). To delete every memory in a store, call deleteAll(userId) explicitly. Note the argument order: delete(userId, memoryId).");
     return this.post("/api/v1/memory/forget", { user_id: this.uid(userId), memory_id: id });
   }
   /** Delete all memories in a store; it also clears the store's time zone and speakers.
@@ -1159,7 +1163,7 @@ export class Client {
 
   /** Fetch the bytes of an image memory. */
   async getImage(userId: string | undefined, memoryId: string): Promise<ImageBytes> {
-    const id = requiredId(memoryId, "memoryId is required — the id that add/store or listImages returned.");
+    const id = requiredId(memoryId, "memoryId is required (non-blank) — the id that add/store or listImages returned.");
     return this.requestBytes("/api/v1/memory/image", { user_id: this.uid(userId), memory_id: id });
   }
 
@@ -1171,7 +1175,7 @@ export class Client {
   ): Promise<ImageDeleteResult> {
     checkOpts(opts, KNOWN_FORGET_IMAGE_KEYS, "forgetImage");
     const preview = previewOf(opts);
-    const id = requiredId(memoryId, "memoryId is required — the id of the memory whose image you want removed.");
+    const id = requiredId(memoryId, "memoryId is required (non-blank) — the id of the memory whose image you want removed.");
     const body: Record<string, unknown> = { user_id: this.uid(userId), memory_id: id };
     if (!preview) return this.remove("/api/v1/memory/image", body);
     body.preview = true;
@@ -1228,7 +1232,7 @@ export class Client {
       const named: Record<string, string | null> = {};
       for (const [role, name] of Object.entries(d)) {
         if (role !== "user" && role !== "assistant") {
-          throw new Error(`defaultSpeakers takes user and assistant only, not ${JSON.stringify(role)}.`);
+          throw new Error(`defaultSpeakers takes "user" and "assistant" only, got ${JSON.stringify(role)}.`);
         }
         if (name === undefined) continue;
         named[role] = name === null ? null : checkWrittenSpeaker(name, `defaultSpeakers.${role}`);
@@ -1237,7 +1241,7 @@ export class Client {
       body.default_speakers = named;
     }
     if (body.time_zone === undefined && body.default_speakers === undefined) {
-      throw new Error("setSettings needs timeZone or defaultSpeakers: there is nothing else to set.");
+      throw new Error("setSettings needs timeZone, defaultSpeakers or both.");
     }
     const confirmed = optBool(opts.confirmedByUser, "confirmedByUser");
     if (confirmed !== undefined) body.confirmed_by_user = confirmed;

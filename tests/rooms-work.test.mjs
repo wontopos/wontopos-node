@@ -148,8 +148,8 @@ test("addTurn sends when it happened and who said each side, checked first", asy
       [{ assistantSpeaker: "\u4e00".repeat(86) }, /assistantSpeaker is at most 256 bytes/],
       [{ createdAt: "" }, /createdAt must be a Date or an RFC 3339 time with Z or a ±hh:mm offset/],
       [{ createdAt: "yesterday" }, /createdAt must be a Date or an RFC 3339 time with Z or a ±hh:mm offset/],
-      [{ createdAt: "2024-03-01" }, /a date alone or a time with no offset is refused\), got "2024-03-01"/],
-      [{ createdAt: "2024-03-01T10:00:00" }, /a date alone or a time with no offset is refused\), got "2024-03-01T10:00:00"/],
+      [{ createdAt: "2024-03-01" }, /a date alone, a time with no offset, and a space or a small t in place of the T are refused\), got "2024-03-01"/],
+      [{ createdAt: "2024-03-01T10:00:00" }, /a date alone, a time with no offset, and a space or a small t in place of the T are refused\), got "2024-03-01T10:00:00"/],
       [{ createdAt: "2026-05-02 09:00:00Z" }, /createdAt must be a Date/],
       [{ createdAt: "2026-05-02T09:00Z" }, /createdAt must be a Date/],
       [{ createdAt: "2026-05-02T09:00:00+0530" }, /createdAt must be a Date/],
@@ -457,11 +457,11 @@ test("setSettings refuses what it cannot send, and a changed time zone needs the
   await withServer([[409, unconfirmed]], async (seen, base) => {
     const mem = new Client({ apiKey: KEY, baseUrl: base });
     const cases = [
-      [{}, /needs timeZone or defaultSpeakers/],
-      [{ confirmedByUser: true }, /needs timeZone or defaultSpeakers/],
+      [{}, /needs timeZone, defaultSpeakers or both/],
+      [{ confirmedByUser: true }, /needs timeZone, defaultSpeakers or both/],
       [{ timeZone: " " }, /timeZone is required/],
       [{ defaultSpeakers: "Alice" }, /defaultSpeakers must be an object/],
-      [{ defaultSpeakers: { owner: "Alice" } }, /takes user and assistant only, not "owner"/],
+      [{ defaultSpeakers: { owner: "Alice" } }, /takes "user" and "assistant" only, got "owner"/],
       [{ defaultSpeakers: { user: "" } }, /defaultSpeakers\.user must be a speaker's name/],
       [{ timeZone: "Asia/Seoul", confirmedByUser: "yes" }, /confirmedByUser must be true or false/],
       [{ time_zone: "Asia/Seoul" }, /unknown setSettings option "time_zone" — did you mean "timeZone"/],
