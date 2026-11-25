@@ -56,7 +56,7 @@ const SUMMARY_KEYS = ["seeded", "readers", "combine_rounds", "items", "items_dro
 const nightSummary = (res) => JSON.parse(JSON.stringify(Object.fromEntries(SUMMARY_KEYS.map((k) => [k, res[k] ?? null]))));
 
 const REFERENCE_CALLS = 27;
-const REFERENCE_CALLS_DIGEST = "66cc5bf1dbde699a22947dc8e1b55991ec0fd5f410bcf6bcc27f3f171144cf4a";
+const REFERENCE_CALLS_DIGEST = "1fdfdb7d867b28e3e95a1d8fe57a35e3c07a5078d71f2dff63a96e9805dce82f";
 const REFERENCE_NIGHTS_DIGEST = "bbedfa7a042245922190822e61443b41086ee03466b8f61da790cae7bb0184b7";
 const REFERENCE_STATE_DIGEST = "e3ebd0a08e7d1eae4e93b0a26bc7cdfec5c2cd5677d46e634ad367351117033b";
 
@@ -222,7 +222,11 @@ function scripted(system, user, first) {
     const [heading, text] = sectionOf(user);
     return heading === "Big list" ? { text: text + " and more" } : { text: text.split("\n").slice(0, 3).join("\n") };
   }
-  if (system.includes("there is no room")) return { text: "## Big list\n- Trimmed to what matters." };
+  if (system.includes("there is no room")) {
+    const held = [...user.matchAll(/^## (.+)$/gm)].map((m) => m[1]);
+    if (held.includes("Big list")) return { text: "## Big list\n- Trimmed to what matters." };
+    return { text: held.map((h) => `## ${h}\n- Trimmed.`).join("\n\n") };
+  }
   throw new Error("a call the script does not know: " + system.slice(0, 80));
 }
 
@@ -475,7 +479,7 @@ const PROMPT_DIGESTS = {
   SLEEP_SETTLE: "c20ba6effc265bd5612530f0f657e660a30eff85f28fd846b79ba5bed20163ca",
   SLEEP_FOLD_SECTION: "294ec09cd08d75e1778d567c7a3b1eb2dd4dd221f662334f51d8449260fe3881",
   SLEEP_TIDY: "dff0600c9f98c1cc5928f75dd0101e5928e31f06a0d6aadc1a2f553706e3c16c",
-  SLEEP_ROOM: "41aff5a9ccb596e41031bd269a78dc4bc71aa5a9a47ec08f67ac8361c4926168",
+  SLEEP_ROOM: "14373fe41ff1d594a8b90b6be022a567d1a9233844f213351270fb4ce6243186",
   SLEEP_READER_NOTE: "0fa78c4e82cdb880ad70871895a61d7dcdc6505d5b1d1a0498c6c3c75669f028",
 };
 const OPEN_BOX_DIGEST = "4fa83367c475682278e48a00a6b24fdd86a35240c36965001512e4219c1d64d8";
@@ -484,7 +488,7 @@ test("sleep: the texts the model reads are the Python sleep's bytes", () => {
   for (const [name, want] of Object.entries(PROMPT_DIGESTS)) assert.equal(sha256(sleep[name]), want, name);
   assert.equal(sha256(pyDumps(sleep.SLEEP_OPEN_BOX)), OPEN_BOX_DIGEST, "open_box");
   assert.equal(sleep.SLEEP_NOT_JSON, "\n\nYour last answer was not valid JSON. Answer with the JSON object only.");
-  assert.equal(SLEEP_VERSION, "1.0.2");
+  assert.equal(SLEEP_VERSION, "1.0.3");
   assert.equal(sleep.SLEEP_VERSION, SLEEP_VERSION);
 });
 
@@ -537,6 +541,11 @@ test("sleep: the token estimate counts digits, ASCII and wide characters apart, 
 });
 
 const PY = JSON.parse(readFileSync(new URL("./sleep-python.json", import.meta.url), "utf8"));
+
+test("sleep: a heading of hash marks alone keeps them as its name", () => {
+  assert.deepEqual(sleep.SLEEP_PYTHON.sleepSections("## #\n- a\n\n## ## Me\n- b\n\n## ##\n- c\n\n## \n- d"),
+    [["#", "- a"], ["Me", "- b"], ["##", "- c"], ["", "- d"]]);
+});
 
 test("sleep: what Python decides about text, numbers and JSON, the TypeScript sleep decides the same", () => {
   const p = sleep.SLEEP_PYTHON;
@@ -722,7 +731,7 @@ test("sleep: one night asks the service in this order", async (t) => {
   assert.equal(res.done.changed, true);
   assert.deepEqual([res.sleep_id, res.memories, res.today], ["s-1", 20, "2026-09-15 23:00"]);
   assert.equal(res.llm_in, res.log.filter((x) => "in" in x).reduce((n, x) => n + x.in, 0));
-  assert.deepEqual([res.sleep_version, SLEEP_VERSION], ["1.0.2", "1.0.2"]);
+  assert.deepEqual([res.sleep_version, SLEEP_VERSION], ["1.0.3", "1.0.3"]);
   assert.ok(res.llm_out > 0);
 });
 
@@ -790,11 +799,11 @@ test("sleep: a file the service counts over its cap is made room for once, then 
   assert.equal(paths(svc).filter((p) => p === "self/write").length, 3);
   const writes = svc.seen.filter((x) => x.path.endsWith("/self/write")).map((x) => x.body.writes);
   assert.deepEqual(writes.map((ws) => ws.map((w) => w.slot)), [[0, 1], [0, 1], [0]]);
-  assert.equal(writes[1][1].body, "## Big list\n- Trimmed to what matters.\n");
+  assert.equal(writes[1][1].body, "## Garden project\n- Trimmed.\n");
   const room = model.texts.filter(([s]) => s.includes("there is no room")).map(([s]) => s);
   assert.equal(room.length, 1);
   assert.ok(room[0].includes('left its box "" at 13 tokens, over its cap\nof 11: there is no room'));
-  assert.deepEqual(res.rooms, [{ file: 1, before: 13, after: 9 }]);
+  assert.deepEqual(res.rooms, [{ file: 1, before: 13, after: 7 }]);
   assert.deepEqual(res.refused.at(-1), { edit: { file: 1, op: "room" }, why: "no room: the service counts it over its cap; the file stays as it was" });
   assert.deepEqual(res.written, { 0: 1 });
   assert.deepEqual(svc.slots[1], []);
@@ -810,9 +819,9 @@ test("sleep: when the service names the file and its count, the room is made aga
   const res = await nap(mem, model, { today: "2026-09-15 23:00" });
   const room = model.texts.filter(([s]) => s.includes("there is no room")).map(([s]) => s);
   assert.ok(room[0].includes("at 13 tokens, over its cap\nof 10: there is no room"));
-  assert.deepEqual(res.rooms, [{ file: 1, before: 13, after: 9 }]);
+  assert.deepEqual(res.rooms, [{ file: 1, before: 13, after: 7 }]);
   assert.deepEqual(res.written, { 0: 1, 1: 1 });
-  assert.equal(svc.latest(1).body, "## Big list\n- Trimmed to what matters.\n");
+  assert.equal(svc.latest(1).body, "## Garden project\n- Trimmed.\n");
 });
 
 test("sleep: a no-room answer that counts 0 tokens makes room against the client's own cap", async (t) => {
@@ -823,7 +832,7 @@ test("sleep: a no-room answer that counts 0 tokens makes room against the client
   const res = await nap(mem, model, { today: "2026-09-15 23:00" });
   const room = model.texts.filter(([s]) => s.includes("there is no room")).map(([s]) => s);
   assert.ok(room[0].includes("at 13 tokens, over its cap\nof 11: there is no room"), room[0]);
-  assert.deepEqual(res.rooms, [{ file: 1, before: 13, after: 9 }]);
+  assert.deepEqual(res.rooms, [{ file: 1, before: 13, after: 7 }]);
   assert.deepEqual(res.written, { 0: 1, 1: 1 });
 });
 
@@ -1134,7 +1143,7 @@ test("sleep: a line with no speaker in a night of two people is a person's, mark
   assert.deepEqual(who, ["Dana", "user", "Mina", "Kai", "Kai"]);
 });
 
-const BASIS = { sleep_version: "1.0.2", model: "claude-sonnet-5-5", effort: "high", prompt_caching: false, margin: 0.15 };
+const BASIS = { sleep_version: "1.0.3", model: "claude-sonnet-5-5", effort: "high", prompt_caching: false, margin: 0.15 };
 const PY_ESTIMATES = {
   priced: { sleep_id: "s-1", memories: 20, tokens: 460, parts: 1, readers: 1, input_tokens: 2219, output_tokens: 33, cost: 0.002742, basis: { ...BASIS, prices: [1, 5] }, sleepy: false },
   none: { sleep_id: "s-2", memories: 0, tokens: 0, parts: 0, readers: 0, input_tokens: 0, output_tokens: 0, cost: 0, basis: { ...BASIS, prices: [2, 10] }, sleepy: false },
@@ -1422,7 +1431,7 @@ test("sleep: sleep.js ships beside both builds, with only its public names in th
   }
   const dts = read("../dist/sleep.d.ts");
   assert.equal(read("../dist/cjs/sleep.d.ts"), dts, "the CJS types carry the same declarations");
-  assert.match(dts, /export declare const SLEEP_VERSION = "1\.0\.2";/);
+  assert.match(dts, /export declare const SLEEP_VERSION = "1\.0\.3";/);
   assert.match(dts, /export declare class SleepSettings/);
   assert.match(dts, /export interface SleepSettingsOptions/);
   for (const internal of ["sleepFlow", "SLEEP_DIGEST", "SleepHost", "sleepTokens", "SLEEP_PYTHON"]) {
@@ -1489,4 +1498,208 @@ test("the sleep finds fenced JSON in one pass, with the same result as before", 
   const t0 = Date.now();
   assert.throws(() => p.sleepParseJson("```{}x".repeat(50_000)));
   assert.ok(Date.now() - t0 < 500, `took ${Date.now() - t0}ms`);
+});
+
+test("sleep: a room made for the service that leaves a section out is not used, and the box is put back", async (t) => {
+  const [svc, mem] = await served(t);
+  const core = "## Me\n- I am the assistant.\n\n## Dana\n- Dana likes green tea.\n";
+  const box = "## Dana\n- Dana moved to Busan.\n\n## Garden\n- The beans went in in May.\n\n## Trips\n- Busan in the spring.\n";
+  for (const [k, title, body] of [[0, "", core], [1, "People", box]]) {
+    svc.slots[k].push({ version: 1, title, body, tokens: tok(body), evidence: [], day: null });
+  }
+  svc.caps[1] = 30;
+  let counted = 0;
+  svc.count = (text) => (++counted <= 40 ? 2 * tok(text) : 0);
+  svc.give(nightRows(1, DAYS[1]));
+  const shown = [];
+  const llm = (c) => {
+    const system = c.system[0];
+    if (system.includes(" you read part ")) return { text: '{"items": [], "mixed": []}' };
+    if (system.includes("there is no room")) {
+      shown.push(c.user);
+      return { text: JSON.stringify({ text: "## Garden\n- The beans went in in May." }) };
+    }
+    return { text: '{"edits": [], "proposals": [], "notes": []}' };
+  };
+  const res = await mem.sleep("u", { llm, today: "2026-09-15 23:00" });
+  const writes = svc.seen.filter((x) => x.path.endsWith("/self/write")).map((x) => x.body.writes.map((w) => w.slot));
+  assert.deepEqual(writes, [[1], [1]]);
+  assert.equal(shown.length, 1);
+  assert.ok(shown[0].includes("## Trips"));
+  assert.deepEqual(res.refused.slice(-2), [
+    { edit: { file: 1, op: "room" }, why: 'no room: the service counts it over its cap, and the room made left out "Trips"; the file stays as it was' },
+    { edit: { file: 1, op: "room" }, why: "no room: the service counts it over its cap; the file stays as it was" },
+  ]);
+  assert.deepEqual(res.rooms, [{ file: 1, before: res.rooms[0].before, after: null }]);
+  assert.deepEqual([svc.latest(1).body, svc.slots[1].length], [box, 1]);
+});
+
+test("sleep: a write the service refuses past ten times ends the sleep with that refusal", async (t) => {
+  const [svc, mem] = await served(t);
+  const stored = { 1: "## Garden\n- The beans went in in May.\n", 2: "## Trips\n- Busan in the spring.\n" };
+  for (const [k, body] of Object.entries(stored)) {
+    svc.slots[k].push({ version: 1, title: `Box ${k}`, body, tokens: tok(body), evidence: [], day: null });
+    svc.caps[k] = 1;
+  }
+  let counted = 0;
+  svc.count = (text) => (++counted <= 60 ? tok(text) : 0);
+  svc.give(nightRows(1, DAYS[1]));
+  const llm = (c) => {
+    const system = c.system[0];
+    if (system.includes(" you read part ")) {
+      return { text: JSON.stringify({ items: [{ kind: "work", topic: "Notes", text: "Notes were taken.", evidence: ["e1", "e2"] }], mixed: [] }) };
+    }
+    if (system.includes("there is no room")) return { text: '{"text": ""}' };
+    if (system.includes("lines that are only a note of doubt")) return { text: '{"drop": []}' };
+    return {
+      text: JSON.stringify({
+        edits: [
+          { file: "1", op: "rewrite", section: "Aaa", text: "- one", evidence: ["e1", "e2"] },
+          { file: "1", op: "move_section", section: "Aaa", to: "2" },
+          { file: "2", op: "rewrite", section: "Bbb", text: "- two", evidence: ["e1", "e2"] },
+          { file: "2", op: "move_section", section: "Bbb", to: "1" },
+        ],
+        proposals: [],
+        notes: [],
+      }),
+    };
+  };
+  await assert.rejects(mem.sleep("u", { llm, today: "2026-09-15 23:00" }), (e) => e.status === 400 && e.details?.code === "self_no_room");
+  const writes = svc.seen.filter((x) => x.path.endsWith("/self/write")).map((x) => x.body.writes.map((w) => w.slot));
+  assert.equal(writes.length, 11, JSON.stringify(writes));
+  assert.deepEqual({ 1: svc.latest(1).body, 2: svc.latest(2).body }, stored);
+  assert.deepEqual([svc.slots[1].length, svc.slots[2].length], [1, 1]);
+  assert.ok(!svc.seen.some((x) => x.path.endsWith("/sleep/done")));
+});
+
+// Reads each part into one item, and answers with a text cut at its length where `cut` says so: on the first
+// ask, or (`whenAskedAgain`) only on the ask that follows an answer that was not JSON. `relative` numbers the
+// evidence from e1, as a model that counts the lines it was shown does.
+function cutReader(cut, { whenAskedAgain = false, relative = false, garbage = () => false } = {}) {
+  const calls = [];
+  const llm = (c) => {
+    const system = c.system[0];
+    if (!system.includes(" you read part ")) return { text: '{"edits": [], "proposals": [], "notes": []}' };
+    const k = Number(system.split(" you read part ")[1].split(" ")[0]);
+    const lines = c.user.split("<memories>\n")[1].split("\n</memories>")[0].split("\n").filter(Boolean);
+    calls.push([k, lines.length]);
+    const again = c.user.endsWith("Answer with the JSON object only.");
+    if (cut(k, lines.length) && again === whenAskedAgain) return { text: '{"items": [{"kind": "work", "topic": "Nigh', stop: "max_tokens" };
+    if (cut(k, lines.length)) return { text: "I cannot answer in JSON tonight.", stop: "end" };
+    if (garbage(k, lines.length, lines[0].split(" ")[0])) return { text: "I cannot answer in JSON tonight.", stop: "end" };
+    const evidence = relative ? ["e1", "e2"] : [lines[0].split(" ")[0], lines[Math.min(1, lines.length - 1)].split(" ")[0]];
+    return { text: JSON.stringify({ items: [{ kind: "work", topic: `Night ${k}`, text: "Lines were said.", evidence }], mixed: [] }) };
+  };
+  llm.calls = calls;
+  llm.ofTwo = () => calls.filter(([k]) => k === 2).map(([, n]) => n);
+  return llm;
+}
+
+test("sleep: an answer cut at its length is not asked again, and its part is read in halves", async (t) => {
+  const [svc, mem] = await served(t);
+  svc.give(nightRows(0, DAYS[0]));
+  const whole = new Map();
+  const llm = cutReader((k, lines) => {
+    if (!whole.has(k)) whole.set(k, lines);
+    return k === 2 && lines === whole.get(2);
+  });
+  const res = await mem.sleep("u", { llm, today: `${DAYS[0]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+  const ofTwo = llm.ofTwo();
+  assert.equal(ofTwo.length, 3, "the cut answer is not asked again; each half is asked once");
+  assert.equal(ofTwo[1] + ofTwo[2], ofTwo[0]);
+  assert.ok(res.log.some((x) => x.call === "unread parts" && x.parts.length === 0));
+  assert.ok(res.log.some((x) => x.call === "read 2" && x.cut === true && JSON.stringify(x.halves) === JSON.stringify([ofTwo[1], ofTwo[2]])));
+  assert.deepEqual(res.log.filter((x) => String(x.call).startsWith("read 2") && "attempt" in x).map((x) => x.call), ["read 2", "read 2a", "read 2b"]);
+  assert.notEqual(res.done, null);
+  assert.equal(res.items.length, res.readers + 1, "both halves gave their item");
+  const first = res.items.map((it) => Number(it.evidence[0].slice(1)));
+  assert.deepEqual(first, [...first].sort((a, b) => a - b), "the first half's item comes before the second half's");
+});
+
+test("sleep: a half that cannot be read leaves its part unread after one try", async (t) => {
+  for (const second of [true, false]) {
+    const [svc, mem] = await served(t);
+    svc.give(nightRows(0, DAYS[0]));
+    const whole = new Map();
+    const firsts = new Map();
+    const llm = cutReader((k, lines) => {
+      if (!whole.has(k)) whole.set(k, lines);
+      return k === 2 && lines === whole.get(2);
+    }, {
+      garbage: (k, lines, first) => {
+        if (!firsts.has(k)) firsts.set(k, first);
+        return k === 2 && lines < whole.get(2) && (first !== firsts.get(2)) === second;
+      },
+    });
+    const res = await mem.sleep("u", { llm, today: `${DAYS[0]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+    const [a, b] = res.log.find((x) => x.cut).halves;
+    assert.deepEqual(llm.ofTwo(), second ? [a + b, a, b, b] : [a + b, a, a, b], "a piece is tried once: one ask, and one more when the answer is not JSON");
+    assert.ok(res.log.some((x) => x.call === "unread parts" && JSON.stringify(x.parts) === "[2]"));
+    assert.equal(res.done, null);
+    assert.equal(res.items.length, res.readers, "the half that was read still gives its item");
+  }
+});
+
+test("sleep: a part is halved by its tokens, not by its count", async (t) => {
+  const [svc, mem] = await served(t);
+  const rows = nightRows(1, DAYS[1]).slice(0, 8);
+  rows[0].tokens = 5_000;
+  svc.give(rows);
+  const whole = new Map();
+  const llm = cutReader((k, lines) => {
+    if (!whole.has(k)) whole.set(k, lines);
+    return lines === whole.get(k);
+  });
+  const res = await mem.sleep("u", { llm, today: `${DAYS[1]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+  assert.ok(res.log.some((x) => x.call === "read 1" && x.cut === true && JSON.stringify(x.halves) === "[2,6]"), JSON.stringify(res.log.filter((x) => x.cut)));
+  assert.ok(res.log.some((x) => x.call === "unread parts" && x.parts.length === 0));
+});
+
+test("sleep: a part cut at every size is halved twice and asked seven times in all", async (t) => {
+  const [svc, mem] = await served(t);
+  svc.give(nightRows(0, DAYS[0]));
+  const llm = cutReader((k) => k === 2);
+  const res = await mem.sleep("u", { llm, today: `${DAYS[0]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+  const ofTwo = llm.ofTwo();
+  assert.equal(ofTwo.length, 1 + 2 + 4);
+  assert.equal([...ofTwo].sort((a, b) => a - b).slice(0, 4).reduce((a, b) => a + b, 0), ofTwo[0], "the four smallest pieces are the part");
+  assert.ok(Math.min(...ofTwo) >= 2, "no piece of one memory: an item needs two lines");
+  assert.ok(res.log.some((x) => x.call === "unread parts" && JSON.stringify(x.parts) === "[2]"));
+  assert.equal(res.done, null);
+  assert.equal(svc.notes, null, "nothing but proposals and marks goes into the notes");
+});
+
+test("sleep: an answer cut only when asked again is not halved", async (t) => {
+  const [svc, mem] = await served(t);
+  svc.give(nightRows(0, DAYS[0]));
+  const llm = cutReader((k) => k === 2, { whenAskedAgain: true });
+  const res = await mem.sleep("u", { llm, today: `${DAYS[0]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+  const ofTwo = llm.ofTwo();
+  assert.deepEqual(ofTwo, new Array(6).fill(ofTwo[0]), "three tries of two asks each, the whole part every time");
+  assert.ok(!res.log.some((x) => x.cut));
+  assert.ok(res.log.some((x) => x.call === "unread parts" && JSON.stringify(x.parts) === "[2]"));
+});
+
+test("sleep: a part too small to halve is asked as before when its answer is cut", async (t) => {
+  const [svc, mem] = await served(t);
+  svc.give(nightRows(1, DAYS[1]).slice(0, 3));
+  const llm = cutReader(() => true);
+  const res = await mem.sleep("u", { llm, today: `${DAYS[1]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+  assert.deepEqual(llm.calls, new Array(6).fill([1, 3]));
+  assert.ok(!res.log.some((x) => x.cut));
+  assert.ok(res.log.some((x) => x.call === "unread parts" && JSON.stringify(x.parts) === "[1]"));
+});
+
+test("sleep: a renumbered answer of a half is logged under the half's name", async (t) => {
+  const [svc, mem] = await served(t);
+  svc.give(nightRows(0, DAYS[0]));
+  const whole = new Map();
+  const llm = cutReader((k, lines) => {
+    if (!whole.has(k)) whole.set(k, lines);
+    return k === 2 && lines === whole.get(2);
+  }, { relative: true });
+  const res = await mem.sleep("u", { llm, today: `${DAYS[0]} 23:00`, settings: new SleepSettings({ partTokens: 50_000 }) });
+  const named = res.log.filter((x) => x.renumbered).map((x) => x.call);
+  assert.ok(named.includes("read 2a") && named.includes("read 2b"), JSON.stringify(named));
+  assert.ok(!named.includes("read 2"));
 });

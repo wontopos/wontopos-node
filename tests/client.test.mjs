@@ -1394,6 +1394,37 @@ test("410 is a GoneError, says what to do, and is not retried", async () => {
   }
 });
 
+test("a setup refusal names the call that fixes it here (2.2.54)", async () => {
+  const { BadRequestError, NotFoundError } = await import("../dist/wontopos.js");
+  const noZone = JSON.stringify({ error: { type: "invalid_request_error", code: "time_zone_required", message: 'this store has no time zone. Set it once: POST /api/v1/memory/settings {"time_zone":"Asia/Seoul"} with this store\'s user_id. Nothing was stored.' } });
+  const noSpeaker = JSON.stringify({ error: { type: "invalid_request_error", code: "speaker_required", message: "from Scroll 2 a speaker is required. Give metadata.speaker." } });
+  const noStore = JSON.stringify({ error: { type: "not_found_error", store: "alice", message: 'Store \'alice\' does not exist in this API key\'s workspace. Otherwise create it here: POST /api/v1/memory/collection {"user_id":"alice"}.' } });
+  const noMemory = JSON.stringify({ error: { type: "not_found_error", message: "Memory not found in this store." } });
+  const { server, base } = await scriptedServer([[400, {}, noZone], [400, {}, noSpeaker], [404, {}, noStore], [404, {}, noMemory]]);
+  try {
+    const mem = new Client({ apiKey: KEY, baseUrl: base, maxRetries: 0 });
+    let e = await mem.add("x", "alice").then(() => null, (err) => err);
+    assert.ok(e instanceof BadRequestError, `got ${e}`);
+    assert.ok(e.message.endsWith('Nothing was stored. In this client: setSettings(userId, { timeZone: "Asia/Seoul" }).'), e.message);
+    e = await mem.add("x", "alice").then(() => null, (err) => err);
+    assert.ok(
+      e.message.endsWith(
+        "Give metadata.speaker. In this client: register each name with addSpeaker, then " +
+          "setSettings(userId, { defaultSpeakers: { user: ..., assistant: ... } })."
+      ),
+      e.message
+    );
+    e = await mem.search("q", "alice").then(() => null, (err) => err);
+    assert.ok(e instanceof NotFoundError, `got ${e}`);
+    assert.ok(e.message.endsWith('In this client: createStore("alice").'), e.message);
+    // A 404 that is not about making a store says nothing of createStore.
+    e = await mem.get("alice", "m1").then(() => null, (err) => err);
+    assert.equal(e.message, "[404] Memory not found in this store.");
+  } finally {
+    server.close();
+  }
+});
+
 test("a sleep's 410 is its own: sleep_expired keeps its message and code, with no word of a retired model", async () => {
   const { GoneError, ConflictError } = await import("../dist/wontopos.js");
   const expired = JSON.stringify({ error: { type: "gone_error", code: "sleep_expired", message: "This sleep was read too long ago to finish: read again." } });
@@ -1757,6 +1788,26 @@ test("the API key does not survive an object spread", async () => {
   assert.ok(!("apiKey" in spread), "apiKey must not be enumerable");
   assert.ok(!JSON.stringify(spread).includes("SECRETVALUE"), "spreading must not expose the key");
   assert.ok(!JSON.stringify(spread).includes("X-API-Key"), "nor the prepared header");
+});
+
+test("a login in the base URL does not survive an object spread either", async () => {
+  const mem = new Client({ apiKey: "wos-live-SECRETVALUE", userId: "u", baseUrl: "https://gate:hunter2@proxy.example.com" });
+  const spread = JSON.stringify({ ...mem });
+  assert.ok(!spread.includes("hunter2"), "the password must not be enumerable");
+  assert.ok(!spread.includes("Z2F0ZTpodW50ZXIy"), "nor the Basic header made from it");
+  assert.equal(JSON.stringify(mem).includes("hunter2"), false);
+  assert.equal(mem.withUser("v") instanceof Client, true);
+  const sent = [];
+  const fetch = async (url) => (sent.push(String(url)), new Response("{}", { status: 200 }));
+  for (const baseUrl of ["//gate:hunter2@proxy.example.com", "https://gate:hunter2@proxy.example.com"]) {
+    const held = new Client({ apiKey: "wos-live-SECRETVALUE", userId: "u", baseUrl, fetch });
+    for (const c of [held, held.withUser("v")]) {
+      const shown = JSON.stringify({ ...c }) + JSON.stringify(c) + Object.keys(c).join(" ");
+      assert.ok(!/hunter2|Z2F0ZTpodW50ZXIy|SECRETVALUE/.test(shown), `${baseUrl}: ${shown}`);
+    }
+    await held.stats();
+  }
+  assert.deepEqual(sent.map((u) => u.split("/api/")[0]), ["//gate:hunter2@proxy.example.com", "https://proxy.example.com"]);
 });
 
 test("the unknown-filter warning set is bounded", async () => {

@@ -63,7 +63,7 @@ function providerTransport(given: unknown): (url: string, init: Record<string, u
 
 class ProviderUnreachable extends Error {}
 
-const DECIMAL_TEXT = /^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+const DECIMAL_TEXT = /^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
 
 const DROPPED_CODES = new Set([
   "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EPIPE", "ESHUTDOWN", "ETIMEDOUT",
@@ -78,13 +78,13 @@ function providerUnreachable(e: unknown): boolean {
 }
 
 async function providerPost(
-  transport: (url: string, init: Record<string, unknown>) => Promise<Response>, url: string, headers: Record<string, string>,
+  transport: (url: string, init: Record<string, unknown>) => Promise<Response>, url: string, keyHeaders: () => Record<string, string>,
   body: unknown, signal: AbortSignalLike, reasonOf?: (status: number, said: string) => string | undefined,
 ): Promise<Record<string, unknown>> {
   let res: Response;
   try {
     res = await transport(url, {
-      method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal, redirect: "manual",
+      method: "POST", headers: { "content-type": "application/json", ...keyHeaders() }, body: JSON.stringify(body), signal, redirect: "manual",
     });
   } catch (e) {
     if (signal.aborted) throw e;

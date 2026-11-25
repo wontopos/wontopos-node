@@ -20,6 +20,7 @@ const ROUTER_STABLE_MAX_TOKENS = 80_000;
 const ANTHROPIC_CACHE_MIN_TOKENS = 512;
 const FRAME_TOKENS = 64;
 const EXCHANGE_MAX_CHARS = 2_000;
+const EXCHANGES_HELD = 100;
 const EXCHANGE_ANSWER_CHARS = 300;
 const SPEAKER_MAX_BYTES = 256;
 const SKILL_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
@@ -369,7 +370,7 @@ function braceEnds(text: string, starts: number[]): Map<number, number> {
 async function countTokens(caller: ModelCaller, c: ModelCall): Promise<number | undefined> {
   if (!caller.countTokens) return undefined;
   try {
-    const n = await raceAbort(Promise.resolve().then(() => caller.countTokens!(c)), c.signal);
+    const n = await raceAbort(() => caller.countTokens!(c), c.signal);
     return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : undefined;
   } catch {
     return undefined;
@@ -395,12 +396,18 @@ function sumUsage(into: Record<string, unknown>, from: Record<string, unknown>):
   return into as Usage;
 }
 
-function raceAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+function raceAbort<T>(start: () => T | Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(abortError());
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(abortError());
     signal.addEventListener("abort", onAbort, { once: true });
-    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    Promise.resolve()
+      .then(() => {
+        if (signal.aborted) throw abortError();
+        return start();
+      })
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort));
   });
 }
 
@@ -449,6 +456,7 @@ class AskClock {
   }
 
   why(): "deadline" | "caller" | undefined {
+    if (!this.reason && timing.now() >= this.endsAt) this.stop("deadline");
     return this.reason;
   }
 
@@ -592,6 +600,7 @@ class RouterState {
   reserve(store: string, turn: string | undefined, day: string, now: number): { budgetMs: number; done: (ms: number) => void } | { full: string } {
     const L = this.limits;
     const d = this.days.get(store);
+    if (d && d.day > day) day = d.day;
     const today = d && d.day === day ? d : { day, count: 0 };
     if (today.count >= L.perDay) return { full: `this store has asked ${L.perDay} times today` };
     let budgetMs = L.timeMs;
@@ -1011,7 +1020,7 @@ function canonicalJson(v: unknown): string {
 }
 
 export {
-  ANTHROPIC_BASE_URL, ANTHROPIC_CACHE_MIN_TOKENS, ANTHROPIC_VERSION, AskClock, EXCHANGE_MAX_CHARS, FRAME_TOKENS,
+  ANTHROPIC_BASE_URL, ANTHROPIC_CACHE_MIN_TOKENS, ANTHROPIC_VERSION, AskClock, EXCHANGE_MAX_CHARS, EXCHANGES_HELD, FRAME_TOKENS,
   KNOWN_ASK_KEYS, KNOWN_ROUTER_HISTORY_KEYS, KNOWN_ROUTER_TOOLS_KEYS, KNOWN_RUN_SKILL_KEYS, KNOWN_SKILL_MD_KEYS,
   MODEL_MAX_TOKENS, MODEL_RESPONSE_MAX_BYTES, ROUTER_PROMPT_MAX_TOKENS, ROUTER_STABLE_MAX_TOKENS, ROUTER_TEXT, RouterState,
   SKILLS_EXPORT_VERSION, SKILL_MAX_TOKENS, SKILL_MD_INPUT, SKILL_MD_NOT_RUN, SKILL_NAME_RE, SLEEP_MODEL, SPEAKER_MAX_BYTES,

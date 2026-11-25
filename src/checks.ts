@@ -37,10 +37,15 @@ const PAGE_LIMIT_MAX = 20;
 const LIST_LIMIT_MAX = 500;
 const MAX_IMAGES_MAX = 5;
 const VERIFY_MAX = 3;
+// How many lines of the recent conversation a call brings when it is not told: `recall` on a model that keeps
+// a short-term window, and `memory_recent`. A caller sets 0 to 100.
+const RECENT_TURNS = 50;
+const RECENT_TURNS_MAX = 100;
+const WINDOW_MODELS: ReadonlySet<string> = new Set(["scroll-2"]);
 const RECALL_COUNTS = [
   ["roomLimit", "room_limit", 1, 20],
   ["roomExpandTokens", "room_expand_tokens", 0, 20_000],
-  ["shortTermLimit", "short_term_limit", 0, 500],
+  ["shortTermLimit", "short_term_limit", 0, RECENT_TURNS_MAX],
   ["shortTermBudgetTokens", "short_term_budget_tokens", 0, 8_000],
   ["maxImages", "max_images", 0, MAX_IMAGES_MAX],
 ] as const;
@@ -234,11 +239,11 @@ const SEGMENT_KEYS = new Set(["content", "speaker", "created_at"]);
 
 function bulkSegments(segments: unknown): Record<string, unknown>[] {
   if (!Array.isArray(segments) || segments.length === 0) {
-    throw new Error("segments must be a list of at least one { content, speaker?, created_at? }.");
+    throw new Error("segments must be a list of at least one segment (content, and optionally speaker and created_at).");
   }
   return segments.map((s, i) => {
     if (s === null || typeof s !== "object" || Array.isArray(s)) {
-      throw new Error(`segments[${i}] must be an object: { content, speaker?, created_at? }.`);
+      throw new Error(`segments[${i}] must be an object: content, and optionally speaker and created_at.`);
     }
     for (const k of Object.keys(s)) {
       if (!SEGMENT_KEYS.has(k)) {
@@ -247,7 +252,7 @@ function bulkSegments(segments: unknown): Record<string, unknown>[] {
     }
     const seg = s as Record<string, unknown>;
     if (typeof seg.content !== "string" || !seg.content.trim()) {
-      throw new Error(`segments[${i}].content is required: the text of that part, not blank.`);
+      throw new Error(`segments[${i}].content is required: the text of that segment, not blank.`);
     }
     const out: Record<string, unknown> = { content: seg.content };
     if (seg.speaker != null) out.speaker = checkWrittenSpeaker(seg.speaker, `segments[${i}].speaker`);
@@ -271,7 +276,7 @@ const KNOWN_LOOK_KEYS = new Set(["rooms", "tz"]);
 const KNOWN_OPEN_WORK_KEYS = new Set(["rooms", "tz", "maxImages", "ownWords", "diversity"]);
 const KNOWN_MEMORY_TOOLS_KEYS = new Set([
   "preset", "rooms", "tz", "speakers", "assistant", "dates", "images", "sleep", "today", "seen", "usage", "ownWords",
-  "diversity",
+  "diversity", "recentTurns",
 ]);
 const KNOWN_WORK_AROUND_KEYS = new Set(["from", "to", "center"]);
 const KNOWN_SLEEP_KEYS = new Set([
@@ -528,6 +533,7 @@ export {
   KNOWN_PAGE_SIZE_KEYS, KNOWN_RECALL_KEYS, KNOWN_RELABEL_KEYS, KNOWN_RETRIEVALS_KEYS, KNOWN_REVISIONS_KEYS,
   KNOWN_SET_SETTINGS_KEYS, KNOWN_SLEEP_ESTIMATE_KEYS, KNOWN_SLEEP_KEYS, KNOWN_SLEEP_RUN_KEYS, KNOWN_WORK_AROUND_KEYS,
   IDEMPOTENCY_KEY_RE, LIST_LIMIT_MAX, MAX_IMAGES_MAX, MAX_TIMER_MS, MODEL_RE, PAGE_LIMIT_MAX, PAGE_LIMIT_MIN, RECALL_COUNTS,
+  RECENT_TURNS, RECENT_TURNS_MAX, WINDOW_MODELS,
   RELABEL_IDS_MAX, RESEND_MAX, SLEEP_EVIDENCE_CHARS_MAX, SLEEP_EVIDENCE_MAX, assertUsableStoreId, bulkSegments,
   checkAssistant, checkContextLimit, checkCount, checkFilters, checkId, checkMetadataKeys, checkMs, filledText, checkName,
   checkOneLine, checkOpts, checkRange, checkRetries, checkRooms, checkSearchOpts, checkTime, checkWindowRole, checkWrittenSpeaker, editWithin, givenOpts, namedStore, newIdempotencyKey, normalizeImage,

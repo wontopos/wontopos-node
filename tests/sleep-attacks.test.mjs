@@ -296,7 +296,8 @@ test("sleep attacks: planted instructions meet the rules as the fixture says", a
     const [svc, mem] = await served(t);
     if (scenario.before?.proposals) svc.notes = { proposals: structuredClone(scenario.before.proposals), mixed: [] };
     for (const [k, f] of Object.entries(scenario.before?.files ?? {})) {
-      svc.slots[k].push({ version: 1, title: f.title ?? "", body: f.body, tokens: tok(f.body), evidence: [], day: f.day ?? null });
+      const body = expand(f.body);
+      svc.slots[k].push({ version: 1, title: f.title ?? "", body, tokens: tok(body), evidence: [], day: f.day ?? null });
     }
     for (const [n, night] of scenario.nights.entries()) {
       svc.give(nightRows(n, night));

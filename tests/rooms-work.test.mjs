@@ -248,7 +248,8 @@ test("recall refuses an option out of its range before anything is sent", async 
       [{ roomLimit: 2.5 }, /roomLimit must be an integer between 1 and 20/],
       [{ roomExpandTokens: -1 }, /roomExpandTokens must be an integer between 0 and 20000/],
       [{ roomExpandTokens: 20001 }, /roomExpandTokens must be an integer between 0 and 20000/],
-      [{ shortTermLimit: 501 }, /shortTermLimit must be an integer between 0 and 500/],
+      [{ shortTermLimit: 101 }, /shortTermLimit must be an integer between 0 and 100/],
+      [{ shortTermLimit: 500 }, /shortTermLimit must be an integer between 0 and 100/],
       [{ shortTermBudgetTokens: 8001 }, /shortTermBudgetTokens must be an integer between 0 and 8000/],
       [{ maxImages: 6 }, /maxImages must be an integer between 0 and 5/],
       [{ longTerm: "no" }, /longTerm must be true or false/],
@@ -699,7 +700,7 @@ test("memory tools: by default neither who nor when; each turns on alone", async
       "09:12 [02] We agreed to keep the width at 400. (said at least 2 times, first on 2024-08-14)",
       "2024-08-21",
       "14:06 [01] The final width for the gate is 450.",
-      "      [03] Width reminders are on. (corrected later)",
+      "14:06 [03] Width reminders are on. (corrected later)",
     ].join("\n"));
     assert.ok(!when.note.includes("each line says who") && when.note.includes("memory_timeline shows"));
   });
@@ -802,10 +803,10 @@ test("memory tools: most relevant first with who said it; the timeline puts them
       "2024-08-15",
       "[04] user: Moved to Porto.",
       "09:12 [03] you: Setting the width at 400 involves…",
-      "      [02] user: We agreed to keep the width at 400.",
+      "09:12 [02] user: We agreed to keep the width at 400.",
       "2024-08-21",
       "14:06 [01] you: The final width for the gate is 450.",
-      "      [05] Milo: Width reminders are on. (corrected later)",
+      "14:06 [05] Milo: Width reminders are on. (corrected later)",
     ].join("\n"));
     assert.equal(await mem.run({ name: "memory_around", input: { n: 1 } }), [
       "Around [01]:",
@@ -1415,6 +1416,60 @@ test("memory tools: seen off is the tools without it, to the byte", async () => 
   }
   await assert.rejects(mem.memoryTools("u").run({ name: "memory_recent", input: {} }), /not a memory tool: "memory_recent"/);
   assert.throws(() => mem.memoryTools("u", { seen: 1 }), { message: "seen must be true or false, got 1." });
+});
+
+test("recall asks for 50 lines of the recent conversation where the model keeps a window", async () => {
+  await withServer([], async (seen, base) => {
+    const mem = new Client({ apiKey: KEY, model: "scroll-2", baseUrl: base });
+    await mem.recall("q", "u");
+    await mem.recall("q", "u", { shortTermLimit: 0 });
+    await mem.recall("q", "u", { shortTermLimit: 100 });
+    await mem.withModel("tablet-2").recall("q", "u");
+    const plain = new Client({ apiKey: KEY, baseUrl: base });
+    await plain.recall("q", "u");
+    await plain.withModel("scroll-2").recall("q", "u");
+    await plain.withModel("scroll-2").recall("q", "u", { shortTermLimit: 7 });
+    await mem.recall("q", "u", { shortTermLimit: null });
+    await plain.recall("q", "u", { shortTermLimit: null });
+    assert.deepEqual(seen.map((s) => s.body.short_term_limit ?? null), [50, 0, 100, null, null, 50, 7, 50, null]);
+    assert.ok(seen.filter((s) => s.body.short_term_limit == null).every((s) => !("short_term_limit" in s.body)), "a number not given is no key");
+  });
+});
+
+test("memory tools: memory_recent shows the newest 50 lines, or as many as recentTurns says", async () => {
+  const turns = Array.from({ length: 120 }, (_, i) => ({
+    role: i % 2 === 0 ? "user" : "assistant", content: `line ${i}`,
+    timestamp: `2026-10-20T09:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`,
+  }));
+  const window = JSON.stringify({ turns });
+  await withServer(Array.from({ length: 6 }, () => [200, window]), async (seen, base) => {
+    const mem = new Client({ apiKey: KEY, model: "scroll-2", baseUrl: base });
+    const shown = async (opts = {}) =>
+      (await mem.memoryTools("u", { seen: true, ...opts }).run({ name: "memory_recent", input: {} })).split("\n").slice(1);
+    let lines = await shown();
+    assert.deepEqual([lines.length, lines[0], lines.at(-1)], [50, "#1 you: line 119", "#50 user: line 70"]);
+    lines = await shown({ recentTurns: 100 });
+    assert.deepEqual([lines.length, lines.at(-1)], [100, "#100 user: line 20"]);
+    assert.deepEqual(await shown({ recentTurns: 1 }), ["#1 you: line 119"]);
+    const off = mem.memoryTools("u", { seen: true, recentTurns: 0 });
+    assert.equal(await off.run({ name: "memory_recent", input: {} }), "The recent conversation is not shown here.");
+    assert.equal(await off.run({ name: "memory_seen", input: { n: 1 } }), "Refused: #1 is not a line memory_recent gave.");
+    assert.equal(seen.length, 3, "with recentTurns: 0 the window is not read");
+    const few = mem.memoryTools("u", { seen: true, recentTurns: 3 });
+    assert.equal((await few.run({ name: "memory_recent", input: {} })).split("\n").length, 4);
+    assert.equal(await few.run({ name: "memory_seen", input: { n: 4 } }), "Refused: #4 is not a line memory_recent gave.");
+    assert.equal(seen.length, 4, "a line that was not shown is not looked up");
+    const Made = few.constructor;
+    const made = (recentTurns) => new Made(mem, "u", undefined, undefined, false, false, false, "S-2", false, undefined, undefined, true, false, undefined, undefined, recentTurns);
+    for (const bad of [-1, 101, 500, 1.5, "5", true, NaN]) {
+      assert.throws(() => mem.memoryTools("u", { seen: true, recentTurns: bad }), /recentTurns must be an integer between 0 and 100/, String(bad));
+      assert.throws(() => made(bad), /recentTurns must be an integer between 0 and 100/, String(bad));
+    }
+    for (const unsaid of [undefined, null]) {
+      const lines = (await made(unsaid).run({ name: "memory_recent", input: {} })).split("\n");
+      assert.equal(lines.length, 51, "not given is 50 lines");
+    }
+  });
 });
 
 test("memory tools: seen on adds memory_recent and memory_seen, with no turn open", async () => {

@@ -1187,6 +1187,10 @@ test("routerTools: one tool, ask(request), in both formats; run gives the model 
       assert.equal(await tools.run({ name: "ask", arguments: `{"request": "Fly me", "n": ${n}}` }),
         '{"ok":false,"text":"Refused: the arguments are not JSON."}', n);
     }
+    let deep = "x";
+    for (let i = 0; i < 127; i++) deep = [deep];
+    assert.equal(await tools.run({ name: "ask", input: { request: "Fly me", extra: deep } }),
+      '{"ok":false,"text":"Refused: the arguments are not JSON."}');
     await assert.rejects(tools.run({ name: "memory_search", input: {} }), /not the ask tool/);
     assert.throws(() => wos.routerTools(undefined, { trun: 1 }), /unknown routerTools option "trun"/);
   } finally {

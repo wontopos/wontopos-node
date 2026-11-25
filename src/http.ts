@@ -37,7 +37,7 @@ function causeCode(e: unknown): string | undefined {
 
 function cleanServerText(s: string, max = MAX_ERR_MSG): string {
   // eslint-disable-next-line no-control-regex
-  const clean = s.replace(/[\u0000-\u001f\u007f]/g, "");
+  const clean = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, "");
   return clean.length > max ? clean.slice(0, max) + "…(truncated)" : clean;
 }
 
@@ -282,9 +282,17 @@ function maskKey(key: string): string {
   return key.length >= 24 ? `***${key.slice(-4)}` : "***";
 }
 
+function trimBlanks(s: string): string {
+  let from = 0;
+  let to = s.length;
+  while (from < to && (s[from] === " " || s[from] === "\t")) from++;
+  while (to > from && (s[to - 1] === " " || s[to - 1] === "\t")) to--;
+  return s.slice(from, to);
+}
+
 function parseRateLimit(h: Headers): RateLimit | null {
   const num = (name: string): number | null => {
-    const v = (h.get(name) ?? "").replace(/^[ \t]+|[ \t]+$/g, "");
+    const v = trimBlanks(h.get(name) ?? "");
     if (!/^[0-9]+$/.test(v)) return null;
     const n = Number(v);
     return n <= Number.MAX_SAFE_INTEGER ? n : null;
@@ -297,7 +305,7 @@ function parseRateLimit(h: Headers): RateLimit | null {
 }
 
 function weekUsedOf(h: Headers): number | null {
-  const v = (h.get("X-WOS-Week-Used") ?? "").replace(/^[ \t]+|[ \t]+$/g, "");
+  const v = trimBlanks(h.get("X-WOS-Week-Used") ?? "");
   if (!/^[0-9]+$/.test(v)) return null;
   const n = Number(v);
   return n <= 100 ? n : null;
@@ -386,5 +394,5 @@ export {
   STORE_TIMEOUT_MS, SlowBody, addCapped, asList, asObj, asPageRelative, causeCode, cleanDetails, cleanServerText, defaultTransport,
   dayMinute, discard, finiteNumbers, httpDateMs, inBrowserPage, instantMs, isConnectFailure, isServiceHost, keptIn,
   maskBase, maskKey, maskUserinfo, notAUrl, pageHref, parseBase, parseErrorText, parseRateLimit, plainHttpOnce,
-  retryAfterMs, shownBase, shownSpeaker, timing, tryUrl, warnIfRetiring, warnedRetirements, weekUsedOf,
+  retryAfterMs, shownBase, shownSpeaker, timing, trimBlanks, tryUrl, warnIfRetiring, warnedRetirements, weekUsedOf,
 };

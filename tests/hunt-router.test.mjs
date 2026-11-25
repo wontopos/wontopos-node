@@ -150,3 +150,79 @@ test("a router option of null is left out, as Python leaves out None", async () 
   assert.throws(() => make({ routerCaller: rec.caller, bogus: null }), /unknown router option "bogus"/);
   assert.throws(() => make({ routerCaller: rec.caller, limits: { bogus: null } }), /unknown router\.limits option "bogus"/);
 });
+
+test("runSkill with a signal that is already aborted answers cancelled and never starts the function", async () => {
+  const ran = [];
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const wos = make({
+      routerCaller: recorder().caller,
+      handlers: {
+        pay: (input, ctx) => {
+          ran.push(input);
+          if (ctx.signal.aborted) throw new Error("aborted");
+          return "paid";
+        },
+      },
+    });
+    await wos.addSkill({ name: "pay", description: "Pays a bill.", kind: "code", confirm: true, input: { type: "object" } });
+    assert.equal((await wos.runSkill("pay", { amount: 1 })).text, "paid");
+    const stop = new AbortController();
+    stop.abort();
+    const given = await wos.runSkill("pay", { amount: 900 }, { signal: stop.signal });
+    const bound = await wos.withSignal(stop.signal).runSkill("pay", { amount: 900 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual([given.ok, given.reason, bound.ok, bound.reason], [false, "cancelled", false, "cancelled"]);
+    assert.deepEqual(ran, [{ amount: 1 }]);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("a clock that reads an earlier date does not start a store's day again", async () => {
+  const rec = recorder();
+  const wos = make({ routerCaller: rec.caller, limits: { perDay: 2 } });
+  await wos.addSkill(LOOKUP);
+  const asked = [];
+  for (const [i, tz] of [14, -12, 14, -12].entries()) {
+    asked.push(await wos.withTz(tz).ask("q", { turn: `t${i}`, history: "none" }));
+  }
+  assert.deepEqual(asked.map((r) => r.ok), [true, true, false, false]);
+  assert.deepEqual([asked[2].reason, asked[2].detail], ["limit", "this store has asked 2 times today"]);
+  assert.equal(rec.calls.length, 2);
+});
+
+test("the router is shown the newest hundred earlier exchanges, however many the service sends", async () => {
+  const many = Array.from({ length: 5000 }, (_, i) => ({ request: `asked ${i}`, answer: `said ${i}`, at: "2026-10-01T00:00:00Z" }));
+  const engine = await engineWith(many);
+  try {
+    const rec = recorder();
+    const wos = new Client({ apiKey: KEY, baseUrl: engine.base, tz: 9, userId: "u", router: { routerCaller: rec.caller } });
+    await wos.addSkill(LOOKUP);
+    const r = await wos.ask("q");
+    assert.equal(r.ok, true, r.detail);
+    const shown = rec.calls[0].user;
+    assert.deepEqual(
+      [shown.split("request: asked ").length - 1, shown.includes("request: asked 4900\n"), shown.includes("request: asked 4899\n")],
+      [100, true, false],
+    );
+  } finally {
+    engine.close();
+  }
+});
+
+test("an ask's time is read from the clock, so work that never yields to a timer still ends on it", async () => {
+  const rec = recorder();
+  rec.caller.countTokens = () => {
+    const until = Date.now() + 120;
+    while (Date.now() < until);
+    return 10;
+  };
+  const wos = make({ routerCaller: rec.caller, limits: { timeMs: 60 } });
+  await wos.addSkill(LOOKUP);
+  const r = await wos.ask("q", { history: "none" });
+  assert.deepEqual([r.ok, r.reason, rec.calls.length], [false, "timeout", 0]);
+});

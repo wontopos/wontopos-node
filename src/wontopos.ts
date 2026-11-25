@@ -1,6 +1,6 @@
 
 import {
-  SLEEP_READER_NOTE, SleepSettings, parseFiniteJson, sleepBoxIndex, sleepBoxPick, sleepBoxText, sleepDate,
+  SLEEP_READER_NOTE, SleepSettings, nestsDeeper, parseFiniteJson, sleepBoxIndex, sleepBoxPick, sleepBoxText, sleepDate,
   sleepEstimateFlow, sleepEstimateSetup, sleepFile, sleepFlow, sleepHasBody, sleepOpenBox, sleepRender, sleepSetup,
   sleepView,
 } from "./sleep.js";
@@ -13,7 +13,7 @@ import {
   STORE_TIMEOUT_MS, SlowBody, asPageRelative, causeCode, cleanDetails, cleanServerText, defaultTransport, discard,
   dayMinute, finiteNumbers, inBrowserPage, instantMs, isConnectFailure, isServiceHost, keptIn, maskBase, maskKey,
   maskUserinfo, notAUrl, pageHref, parseBase, parseErrorText, parseRateLimit, plainHttpOnce, retryAfterMs, shownBase,
-  shownSpeaker, timing, tryUrl, warnIfRetiring, warnedRetirements, weekUsedOf,
+  shownSpeaker, timing, trimBlanks, tryUrl, warnIfRetiring, warnedRetirements, weekUsedOf,
 } from "./http.js";
 import {
   MAX_PAGES, asRecords, memoryFromGet, memoryRecords, mergeResults, recallShape, truncatedWalk, withCount, withForm,
@@ -30,7 +30,8 @@ import {
   KNOWN_LIST_MEMORIES_KEYS, KNOWN_LOOK_KEYS, KNOWN_MEMORY_TOOLS_KEYS, KNOWN_OPEN_WORK_KEYS, KNOWN_PAGE_KEYS,
   KNOWN_PAGE_SIZE_KEYS, KNOWN_RECALL_KEYS, KNOWN_RELABEL_KEYS, KNOWN_RETRIEVALS_KEYS, KNOWN_REVISIONS_KEYS,
   KNOWN_SET_SETTINGS_KEYS, KNOWN_SLEEP_ESTIMATE_KEYS, KNOWN_SLEEP_KEYS, KNOWN_SLEEP_RUN_KEYS, KNOWN_WORK_AROUND_KEYS,
-  LIST_LIMIT_MAX, MAX_IMAGES_MAX, PAGE_LIMIT_MAX, PAGE_LIMIT_MIN, RECALL_COUNTS, RELABEL_IDS_MAX, RESEND_MAX,
+  LIST_LIMIT_MAX, MAX_IMAGES_MAX, PAGE_LIMIT_MAX, PAGE_LIMIT_MIN, RECALL_COUNTS, RECENT_TURNS, RECENT_TURNS_MAX,
+  RELABEL_IDS_MAX, RESEND_MAX, WINDOW_MODELS,
   SLEEP_EVIDENCE_CHARS_MAX, SLEEP_EVIDENCE_MAX, bulkSegments, checkAssistant, checkContextLimit, checkCount, checkFilters,
   checkId, checkMs, filledText, checkName, checkOpts, checkRange, checkRetries, checkRooms, checkSearchOpts, checkTime,
   checkWindowRole, checkWrittenSpeaker, givenOpts, newIdempotencyKey, normalizeImage, normalizeStoreId, optBool, optRange,
@@ -43,7 +44,7 @@ import {
   openaiReason, openaiReply, providerBase, providerPost, providerTransport, providerUnreachable, providerUrl,
 } from "./callers.js";
 import {
-  ANTHROPIC_BASE_URL, ANTHROPIC_VERSION, AskClock, EXCHANGE_MAX_CHARS, FRAME_TOKENS, KNOWN_ASK_KEYS,
+  ANTHROPIC_BASE_URL, ANTHROPIC_VERSION, AskClock, EXCHANGE_MAX_CHARS, EXCHANGES_HELD, FRAME_TOKENS, KNOWN_ASK_KEYS,
   KNOWN_ROUTER_HISTORY_KEYS, KNOWN_ROUTER_TOOLS_KEYS, KNOWN_RUN_SKILL_KEYS, KNOWN_SKILL_MD_KEYS, MODEL_MAX_TOKENS,
   ROUTER_PROMPT_MAX_TOKENS, ROUTER_STABLE_MAX_TOKENS, ROUTER_TEXT, RouterState, SKILLS_EXPORT_VERSION, SKILL_MAX_TOKENS,
   SKILL_MD_INPUT, SKILL_MD_NOT_RUN, SKILL_NAME_RE, SLEEP_MODEL, asCaller, askHistory, askSpeaker, askTurn, byteLength,
@@ -75,7 +76,7 @@ export type {
   WorkCloseResult, WorkResult, WorkRoom, WorkState, WriteOptions,
 } from "./types.js";
 
-const VERSION = "2.2.53";
+const VERSION = "2.2.54";
 const CAME_FROM_A_LOOK = "memoryId is required (non-blank) — the id a search, recall or work returned.";
 const RUNTIME = (() => {
   const p = (globalThis as any)?.process;
@@ -192,6 +193,25 @@ const STATUS_ERRORS: Record<number, new (s: number, m: string, r?: string, i?: W
   422: BadRequestError,
   429: RateLimitError,
 };
+
+const SETUP_HINTS: Record<string, string> = {
+  time_zone_required: 'In this client: setSettings(userId, { timeZone: "Asia/Seoul" }).',
+  speaker_required:
+    "In this client: register each name with addSpeaker, then " +
+    "setSettings(userId, { defaultSpeakers: { user: ..., assistant: ... } }).",
+};
+const STORE_MISSING_RE = /^Store '([A-Za-z0-9._-]{1,64})' does not exist/;
+
+/** The call here for what the service's message names as an HTTP path: its text is written for every caller. */
+function setupHint(status: number, message: string, details: unknown): string {
+  const code = details && typeof details === "object" ? (details as Record<string, unknown>).code : undefined;
+  if (status === 400 && typeof code === "string" && Object.hasOwn(SETUP_HINTS, code)) return SETUP_HINTS[code];
+  if (status === 404 && message.includes("POST /api/v1/memory/collection")) {
+    const named = STORE_MISSING_RE.exec(message);
+    return `In this client: createStore(${named ? JSON.stringify(named[1]) : "userId"}).`;
+  }
+  return "";
+}
 
 function errorFor(status: number, message: string, requestId?: string, init?: WosErrorInit): WosError {
   const Cls =
@@ -647,6 +667,9 @@ export class Client {
     Object.defineProperty(this, "apiKey", { enumerable: false });
     Object.defineProperty(this, "headers", { enumerable: false });
     Object.defineProperty(this, "routerState", { enumerable: false });
+    Object.defineProperty(this, "base", { enumerable: false });
+    Object.defineProperty(this, "wire", { enumerable: false });
+    if (this.basicAuth !== undefined) Object.defineProperty(this, "basicAuth", { enumerable: false });
   }
 
   /** A client whose key comes from `WONTOPOS_API_KEY` (or `WOS_API_KEY`). */
@@ -777,7 +800,7 @@ export class Client {
     }
     checkMetadataKeys(metadata);
     refuseTurnSides(opts, metadata);
-    if (typeof metadata.speaker === "string") metadata = { ...metadata, speaker: checkWrittenSpeaker(metadata.speaker, "speaker") };
+    if (metadata.speaker != null) metadata = { ...metadata, speaker: checkWrittenSpeaker(metadata.speaker, "speaker") };
     if (opts.createdAt != null) metadata = { ...metadata, created_at: checkTime(opts.createdAt, "createdAt") };
     else if (metadata.created_at != null) metadata = { ...metadata, created_at: checkTime(metadata.created_at, "created_at") };
     const body = this.writeExtras({ user_id: this.uid(userId), content, metadata }, opts);
@@ -821,7 +844,7 @@ export class Client {
     const hasSegments = opts.segments !== undefined && opts.segments !== null;
     if (hasContent && hasSegments) throw new Error("addBulk takes content or segments, not both.");
     if (!hasContent && !hasSegments) {
-      throw new Error("addBulk needs content, or segments: a list of { content, speaker?, created_at? }.");
+      throw new Error("addBulk needs content, or segments: a list of segments (content, and optionally speaker and created_at).");
     }
     if (hasSegments && opts.speaker != null) {
       throw new Error("speaker goes with content: with segments, each segment names its own speaker.");
@@ -905,7 +928,7 @@ export class Client {
       todayStart?: string;
       /** Answer as of this time (RFC3339). */
       now?: string;
-      /** Lines of the recent conversation, 0-500 (from Scroll 2 on; Tablet 2 ignores it). */
+      /** Lines of the recent conversation, 0-100 (default 50 on a model that keeps a short-term window; from Scroll 2 on; Tablet 2 ignores it). */
       shortTermLimit?: number;
       /** Tokens of those lines, 0-8000; 0 sets no limit (from Scroll 2 on; Tablet 2 ignores it). */
       shortTermBudgetTokens?: number;
@@ -933,6 +956,7 @@ export class Client {
       const v = optRange(opts[k], k, min, max);
       if (v !== undefined) body[wire] = v;
     }
+    if (opts.shortTermLimit == null && WINDOW_MODELS.has(this.model)) body.short_term_limit = RECENT_TURNS;
     for (const [k, wire] of [
       ["longTerm", "long_term"],
       ["longTermCutoff", "long_term_cutoff"],
@@ -1235,6 +1259,11 @@ export class Client {
           throw new Error(`defaultSpeakers takes "user" and "assistant" only, got ${JSON.stringify(role)}.`);
         }
         if (name === undefined) continue;
+        if (name !== null && (typeof name !== "string" || !name.trim())) {
+          throw new Error(
+            `defaultSpeakers.${role} must be a speaker's name (a non-blank string), or null to clear it, got ${JSON.stringify(name)}.`
+          );
+        }
         named[role] = name === null ? null : checkWrittenSpeaker(name, `defaultSpeakers.${role}`);
       }
       if (!Object.keys(named).length) throw new Error("defaultSpeakers must name user, assistant or both.");
@@ -1416,6 +1445,8 @@ export class Client {
       ownWords?: boolean;
       /** The diversity every work these tools open asks for, "none", "mmr", "temporal" or "full" (default: "full" on S-2-live; unset on S-2, so none is sent). */
       diversity?: "none" | "mmr" | "temporal" | "full";
+      /** How many lines of the recent conversation `memory_recent` shows, the newest first, 0-100 (default 50; 0 shows none, and the window is not read for it). `memory_recent` comes with `seen: true`: without it this sets nothing. */
+      recentTurns?: number;
     } = {},
   ): MemoryTools<Images> {
     checkOpts(opts, KNOWN_MEMORY_TOOLS_KEYS, "memoryTools");
@@ -1442,7 +1473,7 @@ export class Client {
     return new MemoryTools<Images>(
       model === this.model ? this : this.withModel(model), this.uid(userId), tz, rooms,
       opts.speakers ?? false, opts.dates ?? false, opts.images ?? false, preset, opts.sleep ?? false, day, assistant,
-      opts.seen ?? false, opts.usage ?? false, ownWords, diversity,
+      opts.seen ?? false, opts.usage ?? false, ownWords, diversity, opts.recentTurns,
     );
   }
 
@@ -1913,7 +1944,7 @@ export class Client {
     if (stable.n > ROUTER_STABLE_MAX_TOKENS) {
       return { reason: "too_large", detail: `the router prompt and this store's skills come to ${stable.n} tokens, over ${ROUTER_STABLE_MAX_TOKENS}` };
     }
-    let held = exchanges;
+    let held = exchanges.slice(-EXCHANGES_HELD);
     let call: ModelCall;
     for (;;) {
       const turnText = routerTurn(held, clock, Date.now(), st.name, request);
@@ -1958,9 +1989,10 @@ export class Client {
     if (def.kind === "code") {
       const fn = st.handlers.get(def.name);
       if (!fn) return { reason: "tool_error", detail: `no function is registered for ${def.name} (router.handlers)` };
+      if (run.why()) return run.failure();
       let value: unknown;
       try {
-        value = await raceAbort(Promise.resolve().then(() => fn(copyJson(input), { ...ctx, signal: run.signal })), run.signal);
+        value = await raceAbort(() => fn(copyJson(input), { ...ctx, signal: run.signal }), run.signal);
       } catch (e) {
         if (run.why()) return run.failure();
         return { reason: "tool_error", detail: `${def.name} threw: ${cleanServerText(String((e as Error)?.message ?? e), 512)}` };
@@ -1999,7 +2031,7 @@ export class Client {
     for (let attempt = 0; ; attempt++) {
       if (run.why()) return run.failure();
       try {
-        const reply = replyShape(await raceAbort(Promise.resolve().then(() => caller.call(call)), run.signal));
+        const reply = replyShape(await raceAbort(() => caller.call(call), run.signal));
         if (reply.usage) usage[purpose] = sumUsage(usage[purpose] ?? {}, reply.usage);
         return reply;
       } catch (e) {
@@ -2131,6 +2163,8 @@ export class Client {
     const shown = cleanServerText(e.message);
     let msg = shown.trim() ? shown : `HTTP ${res.status}`;
     if (res.status === 410 && e.details?.code !== "sleep_expired") msg += ` ${GONE_HINT}`;
+    const hint = setupHint(res.status, msg, e.details);
+    if (hint) msg += ` ${hint}`;
     if (unread) msg += ` (the error body could not be read: ${cleanServerText(unread, 512)})`;
     const requestId = e.requestId === undefined ? undefined : cleanServerText(e.requestId, 256) || undefined;
     const err = errorFor(res.status, msg, requestId, {
@@ -2283,7 +2317,7 @@ export class Client {
     if (buf.byteLength === 0) {
       throw new WosError(res.status, "empty image body — the service returned no bytes");
     }
-    return { bytes: buf, contentType: res.headers.get("content-type") ?? "application/octet-stream" };
+    return { bytes: buf, contentType: bareMediaType(res.headers.get("content-type")) };
   }
 
   private idemHeader(key?: string): Record<string, string> | undefined {
@@ -2374,7 +2408,10 @@ export class Client {
     }
     let data: unknown;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(text, (_key, v) => {
+        if (typeof v === "number" && !Number.isFinite(v)) throw new SyntaxError("a number past the range of a JSON number");
+        return v;
+      });
     } catch (e: any) {
       throw new WosError(res.status, `invalid JSON in response: ${cleanServerText(String(e?.message ?? e), 512)}`);
     }
@@ -2419,6 +2456,7 @@ export class MemoryTools<Images extends boolean = false> {
   private readonly live: boolean;
   private readonly ownWords: boolean;
   private readonly diversity?: "none" | "mmr" | "temporal" | "full";
+  private readonly recentTurns: number;
 
   constructor(
     private readonly client: Client,
@@ -2436,7 +2474,9 @@ export class MemoryTools<Images extends boolean = false> {
     private readonly usage: boolean = false,
     ownWords?: boolean,
     diversity?: "none" | "mmr" | "temporal" | "full",
+    recentTurns?: number,
   ) {
+    this.recentTurns = optRange(recentTurns, "recentTurns", 0, RECENT_TURNS_MAX) ?? RECENT_TURNS;
     this.preset = namedPreset(preset);
     const kind = MEMORY_TOOLS_PRESETS.get(this.preset) as MemoryToolsPreset;
     this.photos = kind.photos;
@@ -2662,7 +2702,10 @@ export class MemoryTools<Images extends boolean = false> {
       throw e;
     }
     const type = String(got.contentType ?? "").split(";")[0].trim().toLowerCase();
-    if (!PHOTO_TYPES.has(type)) return `Refused: [${pad2(n)}] is a picture of a kind that cannot be shown (${type || "unknown"}).`;
+    if (!PHOTO_TYPES.has(type)) {
+      const named = !type || type === "application/octet-stream" ? "unknown" : type;
+      return `Refused: [${pad2(n)}] is a picture of a kind that cannot be shown (${named}).`;
+    }
     const data = base64(got.bytes);
     const mediaType = type as "image/jpeg" | "image/png" | "image/gif" | "image/webp";
     return openai
@@ -2671,10 +2714,14 @@ export class MemoryTools<Images extends boolean = false> {
   }
 
   private async recentLines(client: Client): Promise<string> {
+    if (!this.recentTurns) {
+      this.recent = [];
+      return SEEN_TEXT.recentOff;
+    }
     const turns = await client.history(this.store);
     const lines: { at?: string; head: string }[] = [];
     const out: string[] = [];
-    for (const t of [...turns].reverse()) {
+    for (const t of [...turns].reverse().slice(0, this.recentTurns)) {
       const speaker = typeof t.speaker === "string" ? t.speaker.trim() : "";
       const reply = t.role === "assistant";
       const who = reply || speaker === "me" ? "you" : speaker ? shownSpeaker(speaker) : "user";
@@ -2778,7 +2825,6 @@ export class MemoryTools<Images extends boolean = false> {
     const out: string[] = [];
     let day: string | null | undefined = null;
     let zone = "";
-    let minute: string | undefined;
     said.forEach((s, i) => {
       const z = s.time !== undefined ? s.zone ?? ""
         : s.date === day ? zone
@@ -2787,19 +2833,28 @@ export class MemoryTools<Images extends boolean = false> {
         out.push(s.date === undefined ? "(no date)" : z ? `${s.date} ${z}` : s.date);
         day = s.date;
         zone = z;
-        minute = undefined;
       }
-      const head = s.time === undefined ? "" : s.time === minute ? "      " : `${s.time} `;
-      if (s.time !== undefined) minute = s.time;
-      out.push(head + (s.timed ?? s.text));
+      out.push((s.time === undefined ? "" : `${s.time} `) + (s.timed ?? s.text));
     });
     return out.join("\n");
   }
 }
 
+const MEDIA_TYPE = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
+
+function bareMediaType(value: string | null): string {
+  let out = "application/octet-stream";
+  for (const given of (value ?? "").split(",")) {
+    const named = trimBlanks(given.split(";", 1)[0]);
+    if (MEDIA_TYPE.test(named)) out = named.toLowerCase();
+  }
+  return out;
+}
+
 function callInput(call: MemoryToolCall): Record<string, unknown> | undefined {
   try {
     const raw = call.input ?? (typeof call.arguments === "string" && call.arguments.trim() ? parseFiniteJson(call.arguments) : {});
+    if (nestsDeeper(raw, 127)) return undefined;
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   } catch {
     return undefined;
@@ -2931,14 +2986,14 @@ export function anthropicCaller(opts: AnthropicCallerOptions): ModelCaller {
   const ttl = opts.cacheTtl ?? "5m";
   if (optBool(opts.dangerouslyAllowBrowser, "dangerouslyAllowBrowser") !== true && inBrowserPage()) throw new Error(MODEL_KEY_BROWSER_REFUSAL);
   const transport = providerTransport(opts.fetch);
-  const headers = { "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION };
+  const keyHeaders = (): Record<string, string> => ({ "x-api-key": key, "anthropic-version": ANTHROPIC_VERSION });
   const caller = {
     ...(model !== undefined ? { model } : {}),
     baseUrl: base,
     call: async (c: ModelCall): Promise<ModelReply> =>
-      anthropicReply(await providerPost(transport, `${base}/v1/messages`, headers, anthropicBody(c, false, ttl), c.signal)),
+      anthropicReply(await providerPost(transport, `${base}/v1/messages`, keyHeaders, anthropicBody(c, false, ttl), c.signal)),
     countTokens: async (c: ModelCall): Promise<number> => {
-      const r = await providerPost(transport, `${base}/v1/messages/count_tokens`, headers, anthropicBody(c, true, ttl), c.signal);
+      const r = await providerPost(transport, `${base}/v1/messages/count_tokens`, keyHeaders, anthropicBody(c, true, ttl), c.signal);
       const n = r.input_tokens;
       if (typeof n !== "number" || !Number.isInteger(n) || n < 0) throw new ModelCallError(200, "count_tokens answered without input_tokens");
       return n;
@@ -2966,7 +3021,7 @@ export function openaiCaller(opts: OpenAICallerOptions): ModelCaller {
   const allowBrowser = optBool(opts.dangerouslyAllowBrowser, "dangerouslyAllowBrowser") === true;
   if (key !== undefined && !allowBrowser && inBrowserPage()) throw new Error(MODEL_KEY_BROWSER_REFUSAL);
   const transport = providerTransport(opts.fetch);
-  const headers: Record<string, string> = key === undefined ? {} : { authorization: `Bearer ${key}` };
+  const keyHeaders = (): Record<string, string> => (key === undefined ? {} : { authorization: `Bearer ${key}` });
   const caller = {
     model,
     baseUrl: base,
@@ -2974,7 +3029,7 @@ export function openaiCaller(opts: OpenAICallerOptions): ModelCaller {
       for (;;) {
         const format = c.schema ? formats[level] : "none";
         try {
-          const r = await providerPost(transport, `${base}/chat/completions`, headers, openaiBody(c, format, maxField, effort), c.signal, openaiReason);
+          const r = await providerPost(transport, `${base}/chat/completions`, keyHeaders, openaiBody(c, format, maxField, effort), c.signal, openaiReason);
           return openaiReply(r);
         } catch (e) {
           const refused = e instanceof ModelCallError && FORMAT_REFUSED.has(e.status) && (e.reason === undefined || e.reason === "bad_request") &&

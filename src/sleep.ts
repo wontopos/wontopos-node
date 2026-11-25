@@ -4,7 +4,7 @@ import type {
 } from "./wontopos.js";
 
 /** The version of the sleep's texts, steps and rules. */
-export const SLEEP_VERSION = "1.0.2";
+export const SLEEP_VERSION = "1.0.3";
 
 /** @internal */
 export const SLEEP_DIGEST = `You are the sleep of {being}. While {being} sleeps, you read part {k} of {n} of what happened
@@ -202,8 +202,9 @@ Answer with JSON only: {{"drop": [<the numbers of the lines to take out; none, m
 /** @internal */
 export const SLEEP_ROOM = `You are the sleep of {being}. Tonight's changes left its {where} at {used:,} tokens, over its cap
 of {cap:,}: there is no room. Make room until it is at most {cap:,} tokens: fold sections into fewer
-lines, leave out what a search gives back{core_way}. Keep what tonight added that matters, and keep
-{being}'s voice.
+lines and leave out what a search gives back. Every section stays under its own heading, with at
+least one line{core_way}: an answer that leaves a section out is not used. Keep what tonight added
+that matters, and keep {being}'s voice.
 
 Answer with JSON only: {{"text": "<the whole file, with its ## sections>"{moved}}}`;
 
@@ -240,6 +241,11 @@ const SLEEP_MIN_EVIDENCE = 2;
 const SLEEP_FOLD_LINES = 4;
 const SLEEP_LINE_TOKENS = 90;
 const SLEEP_DOUBT_TOKENS = 25;
+const SLEEP_AFTER_ASKS = 100;
+const SLEEP_WRITE_REFUSALS = 10;
+const SLEEP_SPLIT_DEPTH = 2;
+/** @internal */
+export const SLEEP_ASKED_OUT = `the sleep puts at most ${SLEEP_AFTER_ASKS} questions to the model to settle, tidy and fold after the merge`;
 const SLEEP_OVERTURN = 1;
 const SLEEP_MIX_KINDS = new Set(["echo", "planted", "speaker"]);
 const SLEEP_MIN_PART = 50_000;
@@ -729,6 +735,66 @@ function sleepKept(text: string): string {
   return sleepUntag(text.replace(SLEEP_RARE, "\n    "));
 }
 
+function sleepSeenAs(name: string): string {
+  return sleepHeading(sleepKept(name).split("\n", 1)[0]);
+}
+
+/**
+ * The sections of the core a room's "moved" takes to a box, as [box, index of the section]. A move names one
+ * section: the only one of that exact name, else the only one the model was shown under it. A name two sections
+ * answer to moves neither of them, and `Me`, a move with no name, and a section whose name a box cannot keep (`#`)
+ * stay where they are.
+ */
+function sleepRoomMoves(held: [string, string][], moved: unknown): [number, number][] {
+  const out: [number, number][] = [];
+  for (const mv of pyIter(moved)) {
+    if (!isPlainObject(mv) || !["1", "2", "3", "4"].includes(pyStr(mv.to))) continue;
+    const name = sleepHeading(pyStr(pyOr(mv.section, "")));
+    if (name === "") continue;
+    const all = held.map((_, j) => j);
+    let at = all.filter((j) => held[j][0] === name);
+    if (!at.length) at = all.filter((j) => sleepSeenAs(held[j][0]) === name);
+    if (at.length !== 1 || out.some(([, j]) => j === at[0])) continue;
+    const h = held[at[0]][0];
+    if (h !== SLEEP_ME && sleepHeading(h) === h) out.push([pyInt(mv.to), at[0]]);
+  }
+  return out;
+}
+
+/**
+ * Which section of the file each section of a room's answer is, and the sections it leaves in doubt. A section of
+ * the file answers to its own name when the answer has that heading, else to the heading the model was shown for
+ * it; one that moved answers to none. The answer's sections of one heading stand, in order, for the file's
+ * sections that answer to it, in the file's order. When the answer has fewer than the file, which ones it kept
+ * cannot be told: it is paired from the top (in the core `Me` first, whose text is not the answer's to write), and
+ * every one of them is in doubt.
+ */
+function sleepRoomPairs(held: [string, string][], given: [string, string][], movedAt: number[],
+  core: boolean): [(number | undefined)[], Set<number>] {
+  const out: (number | undefined)[] = new Array(given.length).fill(undefined);
+  const asked = new Map<string, number[]>();
+  given.forEach(([name], i) => {
+    if (name !== "") asked.set(name, [...(asked.get(name) ?? []), i]);
+  });
+  const answersTo = new Map<string, number[]>();
+  held.forEach(([h], j) => {
+    if (h === "" || movedAt.includes(j)) return;
+    const key = asked.has(h) ? h : sleepSeenAs(h);
+    answersTo.set(key, [...(answersTo.get(key) ?? []), j]);
+  });
+  const doubt = new Set<number>();
+  for (const [name, at] of asked) {
+    let group = answersTo.get(name) ?? [];
+    if (at.length < group.length) {
+      for (const j of group) doubt.add(j);
+      const mine = group.filter((j) => core && held[j][0] === SLEEP_ME);
+      group = [...mine, ...group.filter((j) => !mine.includes(j))].slice(0, at.length).sort((x, y) => x - y);
+    }
+    for (let n = 0; n < Math.min(at.length, group.length); n++) out[at[n]] = group[n];
+  }
+  return [out, doubt];
+}
+
 function sleepNamed(text: unknown): string {
   return sleepUntag(pyStr(text).replace(SLEEP_CONTROL, " "));
 }
@@ -738,7 +804,9 @@ function sleepLines(mems: SleepLine[]): string {
 }
 
 function sleepHeading(text: string): string {
-  return pyStrip(pyLstrip(pyStrip(text), "#"));
+  let h = pyStrip(text);
+  while (h.startsWith("#")) h = pyStrip(pyLstrip(h, "#"));
+  return h;
 }
 
 function sleepHeadingBroken(e: Record<string, unknown>): boolean {
@@ -805,7 +873,7 @@ function sleepParseJson(text: string): unknown {
 function sleepSections(body: string): [string, string][] {
   const out: [string, string[]][] = [];
   for (const ln of body.split("\n")) {
-    if (ln.startsWith("## ")) out.push([pyStrip(ln.slice(3)), []]);
+    if (ln.startsWith("## ")) out.push([sleepHeading(ln.slice(3)) || pyStrip(ln.slice(3)), []]);
     else if (out.length) out[out.length - 1][1].push(ln);
   }
   return out.map(([h, b]) => [h, pyStrip(b.join("\n"))]);
@@ -851,7 +919,8 @@ function sleepSetSection(body: string, heading: string, text: string, raw = fals
 
 function sleepDropSection(body: string, heading: string): [string, string | undefined] {
   const secs = sleepSections(body);
-  return [sleepJoin(secs.filter(([h]) => h !== heading)), secs.find(([h]) => h === heading)?.[1]];
+  const gone = secs.filter(([h]) => h === heading).map(([, t]) => t);
+  return [sleepJoin(secs.filter(([h]) => h !== heading)), gone.length ? gone.filter((t) => t !== "").join("\n") : undefined];
 }
 
 function sleepDemote(text: string): string {
@@ -1075,7 +1144,7 @@ function sleepEids(v: unknown): string[] {
 
 type SleepLog = Record<string, unknown>;
 
-function sleepRenumbered(got: unknown, part: SleepLine[], log: SleepLog[], k: number): unknown {
+function sleepRenumbered(got: unknown, part: SleepLine[], log: SleepLog[], name: string | number): unknown {
   if (!isPlainObject(got)) return got;
   const own = new Set(part.map((m) => m.eid));
   const refs: string[] = [];
@@ -1099,7 +1168,7 @@ function sleepRenumbered(got: unknown, part: SleepLine[], log: SleepLog[], k: nu
   for (const it of pyIter(pyOr(got.items, []))) {
     if (isPlainObject(it) && pyTruthy(it.evidence)) it.evidence = sleepEids(it.evidence).map((e) => fix.get(e) ?? e);
   }
-  log.push({ call: `read ${k}`, renumbered: true, part: [part[0].eid, part[part.length - 1].eid] });
+  log.push({ call: `read ${name}`, renumbered: true, part: [part[0].eid, part[part.length - 1].eid] });
   return got;
 }
 
@@ -1333,13 +1402,17 @@ function sleepAsker(host: SleepHost, caller: ModelCaller, model: string, maxToke
 }
 
 async function sleepAskJson(ask: SleepAsk, system: string, user: string, key: string,
-  log: SleepLog[]): Promise<Record<string, unknown> | undefined> {
+  log: SleepLog[], cut?: string[]): Promise<Record<string, unknown> | undefined> {
   for (const attempt of [1, 2]) {
     const [text, meta] = await ask(system, attempt === 1 ? user : user + SLEEP_NOT_JSON);
     log.push({ call: key, attempt, ...meta });
     try {
       return sleepParseJson(text) as Record<string, unknown>;
     } catch {
+      if (cut !== undefined && attempt === 1 && meta.stop === "max_tokens") {
+        cut.push(key);
+        return undefined;
+      }
       continue;
     }
   }
@@ -1347,14 +1420,14 @@ async function sleepAskJson(ask: SleepAsk, system: string, user: string, key: st
 }
 
 async function sleepAskJsonLogged(ask: SleepAsk, system: string, user: string, key: string,
-  log: SleepLog[]): Promise<Record<string, unknown> | undefined> {
+  log: SleepLog[], cut?: string[]): Promise<Record<string, unknown> | undefined> {
   const seen: string[] = [];
   const keep: SleepAsk = async (s, u) => {
     const [text, meta] = await ask(s, u);
     seen.push(text);
     return [text, meta];
   };
-  const got = await sleepAskJson(keep, system, user, key, log);
+  const got = await sleepAskJson(keep, system, user, key, log, cut);
   if (got === undefined && seen.length) {
     const t = seen[seen.length - 1];
     log.push({ call: key, failed: true, chars: cpLen(t), head: cpSlice(t, 0, 300), tail: cpSlice(t, -300) });
@@ -1421,19 +1494,29 @@ async function sleepReadParts(run: SleepRun, mems: SleepLine[], core: string,
   titles: string): Promise<[SleepLine[][], SleepItem[][], number, SleepMark[], number[]]> {
   const parts = sleepParts(mems, run.s.partTokens);
   const many = sleepManyPeople(mems);
-  const read = async (k: number, part: SleepLine[]): Promise<[SleepItem[], number, SleepMark[], number | undefined]> => {
+  const read = async (k: number, part: SleepLine[], name = String(k), depth = 0): Promise<[SleepItem[], number, SleepMark[], number | undefined]> => {
     const system = pyFormat(sleepForPeople(SLEEP_DIGEST, "digest", many), { being: run.being, k, n: parts.length });
     const user = `<core>\n${sleepKept(core) || "(empty)"}\n</core>\n<boxes>\n${titles}\n</boxes>\n<memories>\n${sleepLines(part)}\n</memories>`;
     let got: unknown;
-    for (const attempt of [1, 2, 3]) {
-      const key = `read ${k}` + (attempt === 1 ? "" : ` again ${attempt}`);
-      got = sleepRenumbered(await sleepAskJsonLogged(run.read, system, user, key, run.log), part, run.log, k);
-      if (got !== undefined) break;
+    const cut: string[] = [];
+    const halves = part.length >= 4 && depth < SLEEP_SPLIT_DEPTH;
+    for (const attempt of depth === 0 ? [1, 2, 3] : [1]) {
+      const key = `read ${name}` + (attempt === 1 ? "" : ` again ${attempt}`);
+      const watch = attempt === 1 && (halves || depth > 0) ? cut : undefined;
+      got = sleepRenumbered(await sleepAskJsonLogged(run.read, system, user, key, run.log, watch), part, run.log, name);
+      if (got !== undefined || cut.length) break;
+    }
+    if (got === undefined && cut.length && halves) {
+      const at = sleepHalf(part);
+      run.log.push({ call: `read ${name}`, cut: true, halves: [at, part.length - at] });
+      const a = await read(k, part.slice(0, at), `${name}a`, depth + 1);
+      const b = await read(k, part.slice(at), `${name}b`, depth + 1);
+      return [[...a[0], ...b[0]], a[1] + b[1], [...a[2], ...b[2]], a[3] ?? b[3]];
     }
     const [found, dropped] = sleepCheckedItems(got, new Set(part.map((m) => m.eid)),
       new Set(part.filter((m) => m.mine).map((m) => m.eid)));
     const [mixed, mixedDropped] = sleepCheckedMixed(got, part);
-    if (mixedDropped) run.log.push({ call: `read ${k}`, mixed_dropped: mixedDropped });
+    if (mixedDropped) run.log.push({ call: `read ${name}`, mixed_dropped: mixedDropped });
     return [found, dropped, mixed, got === undefined ? k : undefined];
   };
   const lists: SleepItem[][] = [];
@@ -1450,6 +1533,18 @@ async function sleepReadParts(run: SleepRun, mems: SleepLine[], core: string,
   return [parts, lists, dropped, mixed, unread];
 }
 
+function sleepHalf(part: SleepLine[]): number {
+  // Whole numbers, so a count past 2^53 halves where Python halves it.
+  const of = (m: SleepLine): bigint => (Number.isFinite(m.tokens) ? BigInt(Math.trunc(m.tokens)) : 0n);
+  const total = part.reduce((n, m) => n + of(m), 0n);
+  let size = 0n;
+  for (let i = 0; i < part.length; i++) {
+    size += of(part[i]);
+    if (size >= total - size) return Math.min(Math.max(i + 1, 2), part.length - 2);
+  }
+  return part.length - 2;
+}
+
 async function sleepCombine(run: SleepRun, g: SleepItem[][], rounds: number, knownAll: Set<string>, saidAll: Set<string>): Promise<SleepItem[]> {
   const flat = g.flat();
   if (g.length === 1 || !flat.length) return flat;
@@ -1458,13 +1553,16 @@ async function sleepCombine(run: SleepRun, g: SleepItem[][], rounds: number, kno
   return joined.length ? joined : flat;
 }
 
-async function sleepSettle(run: SleepRun, core: string, sec: string, given: string): Promise<[string | undefined, string]> {
+async function sleepSettle(run: SleepRun, core: string, sec: string, given: string,
+  asks: { n: number }): Promise<[string | undefined, string]> {
   const text = sleepAsLines(given);
   const old = sectionMap(core).get(sec);
   if (old === undefined) return [text, "new"];
   const held = old.split("\n").filter((ln) => pyStrip(ln)).map(pyStrip);
   const tonight = text.split("\n").filter((ln) => pyStrip(ln)).map(pyStrip);
   if (held.filter((ln) => !tonight.includes(ln)).length <= SLEEP_OVERTURN) return [text, "kept"];
+  if (asks.n >= SLEEP_AFTER_ASKS) return [undefined, "not asked"];
+  asks.n++;
   const numbered = held.map((ln, i) => `${i + 1}. ${sleepKept(ln)}`).join("\n");
   const g = await sleepAskJson(run.merge, pyFormat(SLEEP_SETTLE, { being: run.being, name: sleepNamed(sec) }),
     `<as it stood>\n${numbered}\n</as it stood>\n<tonight>\n${text}\n</tonight>`, `settle ${sec}`, run.log);
@@ -1518,43 +1616,62 @@ function sleepPutBack(next: SleepFileState[], files: SleepFileState[], k: number
 }
 
 async function sleepRoom(run: SleepRun, next: SleepFileState[], files: SleepFileState[], k: number, usedNow: number,
-  cap: number, rooms: SleepRoomMade[], refused: SleepRefusal[], carried: SleepCarried, why?: string): Promise<void> {
+  cap: number, rooms: SleepRoomMade[], refused: SleepRefusal[], carried: SleepCarried, over?: string): Promise<void> {
   const me = SLEEP_ME;
   const where = sleepWhere(next, k);
-  const coreWay = k === 0 ? ', or move people who matter less to a box (say which, under "moved")' : "";
+  const coreWay = k === 0 ? ', unless you move a person who matters less to a box (say which, under "moved")' : "";
   const moved = k === 0 ? ', "moved": [{"section": "<heading>", "to": "1|2|3|4"}]' : "";
   const g = (await sleepAskJson(run.merge, pyFormat(SLEEP_ROOM, { being: run.being, where, used: usedNow, cap, core_way: coreWay, moved }),
     `<${where}>\n${sleepKept(next[k].body)}\n</${where}>`, `room ${k}`, run.log)) ?? {};
   let body = pyStrip(pyStr(pyOr(g.text, "")));
   body = body.startsWith("## ") ? sleepJoin(sleepSections(body)) : "";
-  const had = sectionMap(next[0].body);
-  const moves: [number, string, string][] = [];
-  if (k === 0 && body) body = sleepJoin(sleepSections(body).filter(([h]) => had.has(h)));
-  if (k === 0 && body) {
-    const mine = had.get(me);
-    if (mine !== undefined && sectionMap(body).get(me) !== mine) body = sleepSetSection(body, me, mine, true);
-    for (const mv of pyIter(pyOr(g.moved, []))) {
-      if (isPlainObject(mv) && ["1", "2", "3", "4"].includes(pyStr(mv.to))) {
-        const sec = pyStrip(pyStr(pyOr(mv.section, "")));
-        const held = had.get(sec);
-        if (held !== undefined && sec !== me && !sectionMap(body).has(sec) && !moves.some(([, s]) => s === sec)) {
-          moves.push([pyInt(mv.to), sec, held]);
-        }
-      }
+  const held = sleepSections(next[k].body);
+  const given = sleepSections(body);
+  const stored = new Set<string>();
+  for (const f of files) for (const [h, t] of sleepSections(f.body)) if (pyStrip(t) !== "") stored.add(h);
+  const moves = k === 0 && body ? sleepRoomMoves(held, pyOr(g.moved, [])) : [];
+  const movedAt = moves.map(([, j]) => j);
+  const [pair, doubt] = sleepRoomPairs(held, given, movedAt, k === 0);
+  // The file as the answer leaves it: [the section of the file it is, or undefined for a new one, name, text].
+  const made: [number | undefined, string, string][] = [];
+  given.forEach(([name, text], i) => {
+    const j = pair[i];
+    if (j !== undefined) {
+      made.push([j, held[j][0], k === 0 && held[j][0] === me ? held[j][1] : text]);
+    } else if (k !== 0 && name !== "") {
+      let same: [number | undefined, string, string] | undefined;
+      for (let n = made.length - 1; n >= 0 && !same; n--) if (made[n][1] === name) same = made[n];
+      if (same) same[2] = pyStrip(`${same[2]}\n${text}`);
+      else made.push([undefined, name, text]);
     }
+  });
+  if (k === 0 && (made.length || moves.length)) {
+    held.forEach(([h, t], j) => { if (h === me && !pair.includes(j)) made.push([j, me, t]); });
   }
+  body = sleepJoin(made.map(([, h, t]): [string, string] => [h, t]));
   const boxes = new Map<number, string>();
-  for (const [to, sec, held] of moves) boxes.set(to, sleepSetSection(boxes.get(to) ?? next[to].body, sec, held));
-  if (body && run.count(body) <= cap && [...boxes.values()].every((b) => run.count(b) <= run.s.boxTokens)) {
+  for (const [to, j] of moves) boxes.set(to, sleepSetSection(boxes.get(to) ?? next[to].body, held[j][0], held[j][1]));
+  const fits = body !== "" && run.count(body) <= cap && [...boxes.values()].every((b) => run.count(b) <= run.s.boxTokens);
+  const stays = new Set<number>(movedAt);
+  for (const [j, , t] of made) if (j !== undefined && !doubt.has(j) && pyStrip(t) !== "") stays.add(j);
+  if (k === 0) held.forEach(([h], j) => { if (h === me) stays.add(j); });
+  const left: string[] = [];
+  held.forEach(([h, t], j) => {
+    if (h !== "" && pyStrip(t) !== "" && !stays.has(j) && stored.has(h) && !left.includes(h)) left.push(h);
+  });
+  if (fits && left.length === 0) {
     rooms.push({ file: k, before: usedNow, after: run.count(body) });
     next[k].body = body;
     for (const [to, b] of boxes) next[to].body = b;
-    for (const [to, sec, held] of moves) carried.push([k, to, sec, held]);
+    for (const [to, j] of moves) carried.push([k, to, held[j][0], held[j][1]]);
   } else {
+    const cause = fits
+      ? `left out "${sleepNamed(left[0])}"${left.length > 1 ? ` and ${left.length - 1} more` : ""}`
+      : "came back unshaped or still too big";
     rooms.push({ file: k, before: usedNow, after: null });
     refused.push({
       edit: { file: k, op: "room" },
-      why: why || `no room: ${thou(usedNow)} of ${thou(cap)} tokens, and the room made came back unshaped or still too big; the file stays as it was`,
+      why: `${over || `no room: ${thou(usedNow)} of ${thou(cap)} tokens`}, and the room made ${cause}; the file stays as it was`,
     });
     sleepPutBack(next, files, k, carried);
   }
@@ -1591,10 +1708,12 @@ function sleepCode(e: WosError): string | undefined {
   return typeof code === "string" ? code : e.type;
 }
 
-function sleepDedupe(next: SleepFileState[], deduped: Record<string, unknown>[], carried: SleepCarried): void {
+function sleepDedupe(next: SleepFileState[], deduped: Record<string, unknown>[], carried: SleepCarried,
+  putBack?: Set<number>): void {
   const inCore = new Set(sleepSections(next[0].body).map(([h]) => h).filter((h) => h !== SLEEP_ME));
   for (const k of SLEEP_BOXES) {
-    for (const [h] of sleepSections(next[k].body)) {
+    if (putBack?.has(k)) continue;
+    for (const h of new Set(sleepSections(next[k].body).map(([x]) => x))) {
       if (inCore.has(h)) {
         const [body, gone] = sleepDropSection(next[k].body, h);
         next[k].body = body;
@@ -1610,8 +1729,10 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
   deduped: Record<string, unknown>[]): Promise<Record<number, number>> {
   const s = run.s;
   const madeRoom = new Set<number>();
+  const putBack = new Set<number>();
+  let refusals = 0;
   for (;;) {
-    sleepDedupe(next, deduped, carried);
+    sleepDedupe(next, deduped, carried, putBack);
     const writes: SleepWrite[] = SLEEP_SLOTS
       .filter((k) => next[k].body !== files[k].body || next[k].title !== files[k].title)
       .map((k) => ({ slot: k, base_version: files[k].version, title: next[k].title, body: next[k].body, evidence: ev, day }));
@@ -1621,6 +1742,8 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
       r = await host.write("/api/v1/memory/self/write", { user_id: host.store, sleep_id: sleepId, writes });
     } catch (e) {
       if (!(e instanceof BadRequestError) || sleepCode(e) !== "self_no_room") throw e;
+      refusals++;
+      if (refusals > SLEEP_WRITE_REFUSALS) throw e;
       const d: Record<string, unknown> = isPlainObject(e.details) ? { ...e.details } : {};
       const said = SLEEP_NO_ROOM.exec(e.message);
       if (said) {
@@ -1641,6 +1764,7 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
       if (madeRoom.has(k)) {
         refused.push({ edit: { file: k, op: "room" }, why: "no room: the service counts it over its cap; the file stays as it was" });
         sleepPutBack(next, files, k, carried);
+        putBack.add(k);
         continue;
       }
       madeRoom.add(k);
@@ -1651,7 +1775,7 @@ async function sleepWriteFlow(host: SleepHost, run: SleepRun, sleepId: string, f
         ? floorDiv(limit * usedNow, told)
         : floorDiv(Math.min(usedNow, cap) * 9, 10);
       await sleepRoom(run, next, files, k, usedNow, Math.max(1, Math.min(cap, target)), rooms, refused, carried,
-        "no room: the service counts it over its cap, and the room made came back unshaped or still too big; the file stays as it was");
+        "no room: the service counts it over its cap");
       sleepBoxesFit(run, next, files, refused, carried);
       continue;
     }
@@ -1789,6 +1913,8 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
     };
     const own = new Set([me, being, assistant].map((x) => pyStrip(x).toLowerCase()).filter((x) => x));
     const selfish = (name: string): boolean => own.has(pyStrip(name).toLowerCase());
+    const asks = { n: 0 };
+    let unasked = 0;
     for (const e of Array.isArray(g.edits) ? g.edits : []) {
       let why: string | undefined;
       if (!isPlainObject(e)) continue;
@@ -1816,13 +1942,16 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
           why = "a box section is a matter, not its state on a date: rewrite the matter's section";
         } else {
           let text: string | undefined = pyStr(e.text);
+          let how = "";
           if (slot === 0 && sec !== me) {
-            const [t, how] = await sleepSettle(run, core, sec, text);
+            const [t, settledHow] = await sleepSettle(run, core, sec, text, asks);
             text = t;
+            how = settledHow;
             settled.push({ section: sec, how });
           }
           if (text === undefined) {
-            why = "one night overturns one line of a person; the sorting came back unshaped";
+            why = how === "not asked" ? `${SLEEP_ASKED_OUT}; this rewrite was not settled, so it is not made`
+              : "one night overturns one line of a person; the sorting came back unshaped";
           } else {
             next[slot].body = sleepSetSection(next[slot].body, sec, text, slot === 0 && sec === me);
             touch(slot, sec);
@@ -1856,6 +1985,8 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         const sec = sleepHeading(pyStr(pyOr(e.section, "")));
         if (to === undefined || to === slot || ((slot === 0 || to === 0) && selfish(sec))) {
           why = "move needs another file, and the self section stays";
+        } else if (to === 0 && carried.some(([src, , left]) => src === 0 && left === sec)) {
+          why = "a section that left the core tonight is not moved back in the same sleep";
         } else {
           const [body, text] = sleepDropSection(next[slot].body, sec);
           if (text === undefined) {
@@ -1887,6 +2018,11 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
     for (const [k, h] of order) {
       const t = sectionMap(next[k].body).get(h);
       if (!t || (k === 0 && h === me)) continue;
+      if (asks.n >= SLEEP_AFTER_ASKS) {
+        unasked++;
+        continue;
+      }
+      asks.n++;
       const where = sleepWhere(next, k);
       const numbered = t.split("\n").filter((ln) => pyStrip(ln)).map((ln, i) => `${i + 1}: ${sleepKept(ln)}`).join("\n");
       const tg = (await sleepAskJson(run.merge, pyFormat(SLEEP_TIDY, { being, where }),
@@ -1904,6 +2040,11 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
         const long = ls.filter((ln) => count(ln) > SLEEP_LINE_TOKENS).length;
         const limit = k === 0 ? SLEEP_FOLD_LINES * 2 : SLEEP_FOLD_LINES;
         if (ls.length <= limit && !long) continue;
+        if (asks.n >= SLEEP_AFTER_ASKS) {
+          unasked++;
+          continue;
+        }
+        asks.n++;
         const why = [ls.length > limit ? `${ls.length} lines` : "", long ? `${long} lines longer than one idea` : ""]
           .filter((x) => x).join(", ");
         const where = sleepWhere(next, k);
@@ -1918,6 +2059,9 @@ export async function sleepFlow(host: SleepHost, run: SleepRun): Promise<SleepRe
           refused.push({ edit: { file: k, op: "fold", section: h }, why: `fold came back unshaped or longer (${why})` });
         }
       }
+    }
+    if (unasked) {
+      refused.push({ edit: { op: "fold" }, why: `${SLEEP_ASKED_OUT}; ${unasked} more were not asked, and their sections stay as they are` });
     }
     for (const k of SLEEP_SLOTS) {
       const cap = sleepCap(s, k);
